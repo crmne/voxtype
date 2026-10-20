@@ -12,6 +12,7 @@
 //! - [`visual`] — peak-hold decay, waveform envelope and level mapping, palette types.
 //! - [`placement`] — where the card sits on the output the OSD lands on.
 //! - [`config`] — `[osd]` config block (`OsdConfig`).
+//! - [`select`] — which frontend `voxtype-osd` launches (`auto` detection, fallback).
 //! - [`theme`] — Omarchy theme parsing + change watcher.
 //! - [`gtk_env`] — environment workarounds for GTK4 bugs (GTK frontend only).
 
@@ -20,6 +21,7 @@ pub mod gtk_env;
 pub mod ipc;
 pub mod placement;
 pub mod recipe;
+pub mod select;
 pub mod style;
 pub mod supervisor;
 pub mod theme;
