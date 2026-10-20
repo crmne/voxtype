@@ -4,223 +4,309 @@ use crate::setup::binary::{Acceleration, EngineFamily, InstallKind, Variant};
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Modifier, Style},
+    style::Modifier,
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App, SwitchOutcome, COLS, ROWS};
+use super::common::{self, FeedbackLevel};
+use super::theme;
 use std::process::Command;
 
+/// Width of the label column in the Status pane.
+const FACT_LABEL_WIDTH: usize = 9;
+
+/// Width of the engine-family column in the variant matrix.
+const FAMILY_COLUMN_WIDTH: usize = 9;
+
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let chunks = Layout::default()
+    let [body, status] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .areas(area);
+    render_status_line(f, status, app);
+
+    let facts = fact_lines(app, body.width.saturating_sub(4) as usize);
+    let [info, rest] = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(banner_height(app)),
-            Constraint::Length(8), // install/daemon info
-            Constraint::Min(8),    // variant matrix
-            Constraint::Length(2), // legend
-            Constraint::Length(1), // section help
+            Constraint::Length(facts.len() as u16 + 2),
+            Constraint::Min(0),
         ])
-        .split(area);
+        .areas(body);
+    let block = common::pane("Status", false);
+    let inner = block.inner(info);
+    f.render_widget(block, info);
+    f.render_widget(Paragraph::new(facts), inner);
 
-    render_banner(f, chunks[0], app);
-    render_info(f, chunks[1], app);
-
-    // Side-by-side: variant matrix on the left, hint pane on the right.
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .split(chunks[2]);
-    render_matrix(f, body[0], app);
-    render_hint(f, body[1], app);
-
-    render_legend(f, chunks[3]);
-    render_help(f, chunks[4]);
-}
-
-fn banner_height(app: &App) -> u16 {
-    let any = app.last_switch.is_some() || app.restart_needed || app.missing_model.is_some();
-    if any {
-        4
+    let (matrix_area, about_area) = if rest.width >= common::SIDE_BY_SIDE_MIN_WIDTH {
+        let [m, a] = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .areas(rest);
+        (m, a)
     } else {
-        0
+        let [m, a] = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(matrix_height(app, rest.width)),
+                Constraint::Min(0),
+            ])
+            .areas(rest);
+        (m, a)
+    };
+    render_matrix(f, matrix_area, app);
+    if about_area.height >= 3 {
+        render_hint(f, about_area, app);
     }
 }
 
-fn render_banner(f: &mut Frame, area: Rect, app: &App) {
-    if area.height == 0 {
-        return;
-    }
-    let mut lines = Vec::new();
-
-    if let Some(outcome) = &app.last_switch {
-        let style = if outcome.success {
-            Style::default().fg(Color::Green)
+/// What the line under General says: the outcome of the last switch,
+/// download or daemon action, then a pending restart, then nothing to save.
+fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
+    let (level, message) = if let Some(outcome) = &app.last_switch {
+        let level = if outcome.success {
+            FeedbackLevel::Ok
         } else {
-            Style::default().fg(Color::Red)
+            FeedbackLevel::Err
         };
-        let prefix = if outcome.success { "✓ " } else { "✗ " };
-        lines.push(Line::from(Span::styled(
-            format!("{}{}", prefix, outcome.message),
-            style,
-        )));
+        (Some(level), outcome.message.clone())
+    } else if app.restart_needed {
+        (
+            Some(FeedbackLevel::Warn),
+            "Restart the daemon to use the new binary: press D".to_string(),
+        )
+    } else {
+        (
+            None,
+            "Changes here apply at once; nothing to save.".to_string(),
+        )
+    };
+    match level {
+        Some(level) => common::render_status_line(f, area, false, Some((level, &message))),
+        None => f.render_widget(
+            Paragraph::new(Span::styled(
+                common::truncate(&message, area.width.saturating_sub(2) as usize),
+                theme::muted(),
+            )),
+            Rect {
+                x: area.x + 2,
+                width: area.width.saturating_sub(2),
+                ..area
+            },
+        ),
     }
-
-    if app.restart_needed {
-        lines.push(Line::from(Span::styled(
-            "  Daemon restart required: systemctl --user restart voxtype",
-            Style::default().fg(Color::Yellow),
-        )));
-    }
-
-    if let Some(missing) = &app.missing_model {
-        lines.push(Line::from(Span::styled(
-            format!(
-                "⚠ Active {} model not downloaded: {}",
-                missing.engine, missing.model
-            ),
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )));
-        lines.push(Line::from(Span::styled(
-            format!("  Run `{}` to fetch it.", missing.setup_command),
-            Style::default().fg(Color::Gray),
-        )));
-    }
-
-    let block = Block::default().borders(Borders::ALL).title("Status");
-    f.render_widget(
-        Paragraph::new(lines).block(block).wrap(Wrap { trim: true }),
-        area,
-    );
 }
 
-fn render_info(f: &mut Frame, area: Rect, app: &App) {
+fn yes_no_mark(present: bool) -> Span<'static> {
+    if present {
+        Span::styled("✓", theme::ok())
+    } else {
+        Span::styled("✗", theme::muted())
+    }
+}
+
+/// The Status pane: daemon, binary, variants and hardware as label/value
+/// facts, plus the missing-model warning when there is one.
+fn fact_lines(app: &App, width: usize) -> Vec<Line<'static>> {
     let inv = &app.inventory;
+    let value_room = width.saturating_sub(FACT_LABEL_WIDTH + 2);
     let install_kind = match inv.install_kind {
         InstallKind::Package => "package",
-        InstallKind::Source => "source",
+        InstallKind::Source => "source build",
     };
 
-    let daemon_dot = if app.daemon_running {
-        Span::styled("●", Style::default().fg(Color::Green))
+    let daemon = if app.daemon_running {
+        vec![Span::styled("● ", theme::ok()), Span::raw("running")]
     } else {
-        Span::styled("●", Style::default().fg(Color::Red))
-    };
-    let daemon_text = if app.daemon_running {
-        "running"
-    } else {
-        "stopped"
+        vec![
+            Span::styled("○ ", theme::muted()),
+            Span::raw("stopped  "),
+            Span::styled("D starts it", theme::muted()),
+        ]
     };
 
+    let binary = format!("{} ({})", inv.binary_path.display(), install_kind);
     let active = inv
         .active_variant
-        .map(|v| format!("{} ({})", v.display(), v.binary_name()))
+        .map(|v| format!("{} · {}", v.display(), v.binary_name()))
         .unwrap_or_else(|| "unknown (symlink missing or unrecognized)".to_string());
-
     let rec = &inv.recommendation;
-    let recommended = format!("{}  /  {}", rec.whisper.display(), rec.onnx.display());
+    let best = format!("{} · {}", rec.whisper.display(), rec.onnx.display());
 
-    let lines = vec![
-        Line::from(vec![
-            Span::raw("Daemon:        "),
-            daemon_dot,
-            Span::raw(format!(" {}", daemon_text)),
-        ]),
-        Line::from(format!(
-            "Install:       {} ({})",
-            inv.binary_path.display(),
-            install_kind
-        )),
-        Line::from(format!("Active:        {}", active)),
-        Line::from(vec![
-            Span::raw("Recommended:   "),
-            Span::styled("★ ", Style::default().fg(Color::Cyan)),
-            Span::styled(recommended, Style::default().fg(Color::Cyan)),
-            Span::styled("   (Whisper / ONNX)", Style::default().fg(Color::Gray)),
-        ]),
-        Line::from(format!(
-            "CPU:           AVX2={}  AVX-512={}",
-            inv.cpu.avx2, inv.cpu.avx512
-        )),
-        Line::from(format!(
-            "GPU:           NVIDIA={}  AMD={}",
-            inv.gpus.nvidia, inv.gpus.amd
-        )),
+    let mut lines = vec![
+        common::fact_line("Daemon", FACT_LABEL_WIDTH, daemon),
+        common::fact_line(
+            "Binary",
+            FACT_LABEL_WIDTH,
+            vec![Span::raw(common::truncate_middle(&binary, value_room))],
+        ),
+        common::fact_line(
+            "Active",
+            FACT_LABEL_WIDTH,
+            vec![Span::raw(common::truncate(&active, value_room))],
+        ),
+        common::fact_line(
+            "Best fit",
+            FACT_LABEL_WIDTH,
+            vec![
+                Span::styled("★ ", theme::info()),
+                Span::styled(
+                    common::truncate(&best, value_room.saturating_sub(2)),
+                    theme::info(),
+                ),
+            ],
+        ),
+        common::fact_line(
+            "Hardware",
+            FACT_LABEL_WIDTH,
+            vec![
+                Span::raw("AVX2 "),
+                yes_no_mark(inv.cpu.avx2),
+                Span::raw("  AVX-512 "),
+                yes_no_mark(inv.cpu.avx512),
+                Span::raw("  NVIDIA "),
+                yes_no_mark(inv.gpus.nvidia),
+                Span::raw("  AMD "),
+                yes_no_mark(inv.gpus.amd),
+            ],
+        ),
     ];
 
-    let block = Block::default().borders(Borders::ALL).title("Install");
-    f.render_widget(Paragraph::new(lines).block(block), area);
+    if let Some(missing) = &app.missing_model {
+        let text = format!(
+            "{} model {} not downloaded. Run `{}`",
+            missing.engine, missing.model, missing.setup_command
+        );
+        lines.push(common::fact_line(
+            "Model",
+            FACT_LABEL_WIDTH,
+            vec![
+                Span::styled("! ", theme::warn().add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    common::truncate(&text, value_room.saturating_sub(2)),
+                    theme::warn(),
+                ),
+            ],
+        ));
+    }
+    lines
+}
+
+/// Width of each acceleration column for a matrix pane `inner` cells wide.
+fn column_width(inner: usize) -> usize {
+    (inner.saturating_sub(FAMILY_COLUMN_WIDTH) / COLS.len()).clamp(6, 11)
+}
+
+/// Rows the matrix pane needs: header, one row per family, a blank line,
+/// and the legend wrapped to the pane.
+fn matrix_height(app: &App, width: u16) -> u16 {
+    if app.inventory.install_kind == InstallKind::Source {
+        return 8;
+    }
+    let inner = width.saturating_sub(4).max(1) as usize;
+    let legend = legend_lines(inner).len() as u16;
+    1 + ROWS.len() as u16 + 1 + legend + 2
+}
+
+const LEGEND: &[&str] = &[
+    "★ recommended",
+    "● active",
+    "✓ ready",
+    "⚠ CPU/GPU mismatch",
+    "· not installed",
+    "— not built",
+];
+
+/// The legend wrapped between entries, never inside one.
+fn legend_lines(width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for item in LEGEND {
+        match lines.last_mut() {
+            Some(line) if common::str_width(line) + 2 + common::str_width(item) <= width => {
+                line.push_str("  ");
+                line.push_str(item);
+            }
+            _ => lines.push(item.to_string()),
+        }
+    }
+    lines
 }
 
 fn render_matrix(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title("Variant");
+    let block = common::pane("Binary variant", app.content_focused());
     let inner = block.inner(area);
     f.render_widget(block, area);
 
     if app.inventory.install_kind == InstallKind::Source {
+        let features = if app.inventory.compiled_features.is_empty() {
+            "none".to_string()
+        } else {
+            app.inventory.compiled_features.join(", ")
+        };
         let para = Paragraph::new(vec![
-            Line::from("Source build detected."),
-            Line::from(""),
-            Line::from("Variant switching applies only to package installs"),
-            Line::from("(/usr/lib/voxtype/voxtype-*). To enable a different"),
-            Line::from("engine, rebuild with the appropriate Cargo features."),
-            Line::from(""),
-            Line::from(format!(
-                "Compiled features: {}",
-                if app.inventory.compiled_features.is_empty() {
-                    "(none)".to_string()
-                } else {
-                    app.inventory.compiled_features.join(", ")
-                }
-            )),
+            Line::from(Span::styled("Source build", theme::heading())),
+            Line::from(
+                "Variant switching applies only to package installs \
+                 (/usr/lib/voxtype/voxtype-*). To use another engine, rebuild \
+                 with the matching Cargo features.",
+            ),
+            Line::from(vec![
+                Span::styled("Compiled features: ", theme::muted()),
+                Span::raw(features),
+            ]),
         ])
         .wrap(Wrap { trim: true });
         f.render_widget(para, inner);
         return;
     }
 
+    let col_w = column_width(inner.width as usize);
+    let long_cells = col_w >= 10;
     let mut lines = Vec::new();
 
-    // Header row
-    let mut header = vec![Span::raw(format!("{:<10}", ""))];
+    let mut header = vec![Span::raw(" ".repeat(FAMILY_COLUMN_WIDTH))];
     for col in COLS {
         header.push(Span::styled(
-            format!("{:<10}", accel_label(*col)),
-            Style::default().add_modifier(Modifier::BOLD),
+            format!(
+                "{:<w$}",
+                common::truncate(accel_label(*col), col_w - 1),
+                w = col_w
+            ),
+            theme::muted(),
         ));
     }
     lines.push(Line::from(header));
 
-    // One row per engine family
     for (r, family) in ROWS.iter().enumerate() {
         let mut spans = vec![Span::styled(
-            format!("{:<10}", family_label(*family)),
-            Style::default().add_modifier(Modifier::BOLD),
+            format!("{:<w$}", family_label(*family), w = FAMILY_COLUMN_WIDTH),
+            theme::heading(),
         )];
         for (c, _accel) in COLS.iter().enumerate() {
-            let cell = render_cell(app, r, c);
+            let cell = common::truncate(&render_cell(app, r, c, long_cells), col_w - 1);
             let is_cursor = app.cursor == (r, c);
-            let style = if is_cursor {
-                Style::default()
-                    .bg(Color::DarkGray)
-                    .fg(Color::White)
-                    .add_modifier(Modifier::BOLD)
+            let text = format!("{:<w$}", cell, w = col_w - 1);
+            if is_cursor {
+                spans.push(Span::styled(text, theme::selected()));
             } else {
-                Style::default()
-            };
-            spans.push(Span::styled(format!("{:<10}", cell), style));
+                spans.push(Span::raw(text));
+            }
+            spans.push(Span::raw(" "));
         }
         lines.push(Line::from(spans));
     }
+    lines.push(Line::from(""));
+    for legend in legend_lines(inner.width as usize) {
+        lines.push(Line::from(Span::styled(legend, theme::muted())));
+    }
 
-    f.render_widget(Paragraph::new(lines), inner);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
 }
 
-fn render_cell(app: &App, row: usize, col: usize) -> String {
+fn render_cell(app: &App, row: usize, col: usize, long: bool) -> String {
     let Some(variant) = app.variant_at(row, col) else {
         return "—".to_string();
     };
@@ -228,7 +314,13 @@ fn render_cell(app: &App, row: usize, col: usize) -> String {
     let status = app.inventory.variants.iter().find(|s| s.variant == variant);
 
     let glyph = match status {
-        Some(s) if s.active => "● active",
+        Some(s) if s.active => {
+            if long {
+                "● active"
+            } else {
+                "●"
+            }
+        }
         Some(s) if !s.installed => "·",
         Some(s) if !s.runs_on_this_cpu => "⚠ CPU",
         Some(s) if !s.gpu_available => "⚠ GPU",
@@ -248,11 +340,9 @@ fn is_recommended(v: Variant, r: &crate::setup::binary::Recommendation) -> bool 
 }
 
 fn render_hint(f: &mut Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title("About");
-    let inner = block.inner(area);
-    f.render_widget(block, area);
-
     if app.inventory.install_kind == InstallKind::Source {
+        let block = common::pane("About", false);
+        f.render_widget(block, area);
         return;
     }
 
@@ -261,8 +351,7 @@ fn render_hint(f: &mut Frame, area: Rect, app: &App) {
         Some(variant) => variant_hint_lines(variant, app),
         None => na_hint_lines(r, c),
     };
-
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), inner);
+    common::render_guidance(f, area, app, lines);
 }
 
 fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
@@ -270,26 +359,20 @@ fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
     let status = app.inventory.variants.iter().find(|s| s.variant == variant);
 
     let status_line = match status {
-        Some(s) if s.active => Line::from(Span::styled(
-            "● Currently active",
-            Style::default().fg(Color::Green),
-        )),
+        Some(s) if s.active => Line::from(Span::styled("● Currently active", theme::ok())),
         Some(s) if !s.installed => Line::from(Span::styled(
             "· Not installed on this system",
-            Style::default().fg(Color::Gray),
+            theme::muted(),
         )),
         Some(s) if !s.runs_on_this_cpu => Line::from(Span::styled(
             "⚠ Won't run: CPU lacks required instructions",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )),
         Some(s) if !s.gpu_available => Line::from(Span::styled(
             "⚠ Won't accelerate: required GPU not detected",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )),
-        Some(_) => Line::from(Span::styled(
-            "✓ Ready to switch (Enter)",
-            Style::default().fg(Color::Cyan),
-        )),
+        Some(_) => Line::from(Span::styled("✓ Ready to switch (Enter)", theme::info())),
         None => Line::from(""),
     };
 
@@ -298,32 +381,28 @@ fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
     if variant == rec.whisper {
         lines.push(Line::from(Span::styled(
             "★ Recommended for Whisper on this hardware",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::heading(),
         )));
         lines.push(Line::from(Span::styled(
             rec.whisper_reason.to_string(),
-            Style::default().fg(Color::Cyan),
+            theme::info(),
         )));
         lines.push(Line::from(""));
     }
     if variant == rec.onnx {
         lines.push(Line::from(Span::styled(
             "★ Recommended for ONNX engines on this hardware",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::heading(),
         )));
         lines.push(Line::from(Span::styled(
             rec.onnx_reason.to_string(),
-            Style::default().fg(Color::Cyan),
+            theme::info(),
         )));
         lines.push(Line::from(""));
     }
     lines.push(Line::from(Span::styled(
         hint.headline.to_string(),
-        Style::default().add_modifier(Modifier::BOLD),
+        theme::heading(),
     )));
     lines.push(Line::from(""));
     for paragraph in hint.body {
@@ -331,15 +410,15 @@ fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
         lines.push(Line::from(""));
     }
     lines.push(Line::from(vec![
-        Span::styled("Models:    ", Style::default().fg(Color::Gray)),
+        Span::styled("Models:    ", theme::muted()),
         Span::raw(hint.models.to_string()),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Speed:     ", Style::default().fg(Color::Gray)),
+        Span::styled("Speed:     ", theme::muted()),
         Span::raw(hint.speed.to_string()),
     ]));
     lines.push(Line::from(vec![
-        Span::styled("Hardware:  ", Style::default().fg(Color::Gray)),
+        Span::styled("Hardware:  ", theme::muted()),
         Span::raw(hint.hardware.to_string()),
     ]));
 
@@ -351,28 +430,23 @@ fn variant_hint_lines<'a>(variant: Variant, app: &App) -> Vec<Line<'a>> {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "Recommended models",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::heading(),
         )));
         lines.push(Line::from(vec![
-            Span::styled("  English:   ", Style::default().fg(Color::Gray)),
+            Span::styled("  English:   ", theme::muted()),
             Span::raw(models.english.to_string()),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("  European:  ", Style::default().fg(Color::Gray)),
+            Span::styled("  European:  ", theme::muted()),
             Span::raw(models.european.to_string()),
         ]));
         lines.push(Line::from(vec![
-            Span::styled("  Asian:     ", Style::default().fg(Color::Gray)),
+            Span::styled("  Asian:     ", theme::muted()),
             Span::raw(models.asian.to_string()),
         ]));
         if let Some(note) = models.note {
             lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                note.to_string(),
-                Style::default().fg(Color::Gray),
-            )));
+            lines.push(Line::from(Span::styled(note.to_string(), theme::muted())));
         }
     }
 
@@ -403,9 +477,7 @@ fn na_hint_lines<'a>(row: usize, col: usize) -> Vec<Line<'a>> {
     vec![
         Line::from(Span::styled(
             "Not applicable",
-            Style::default()
-                .fg(Color::Gray)
-                .add_modifier(Modifier::BOLD),
+            theme::muted().add_modifier(Modifier::BOLD),
         )),
         Line::from(""),
         Line::from(suggestion.to_string()),
@@ -642,26 +714,6 @@ fn variant_hint(v: Variant) -> VariantHint {
     }
 }
 
-fn render_legend(f: &mut Frame, area: Rect) {
-    let line = Line::from(vec![
-        Span::styled("★ recommended   ", Style::default().fg(Color::Cyan)),
-        Span::raw("● active   "),
-        Span::raw("✓ ready   "),
-        Span::raw("⚠ CPU/GPU mismatch   "),
-        Span::raw("· not installed   "),
-        Span::raw("— not applicable"),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
-}
-
-fn render_help(f: &mut Frame, area: Rect) {
-    let line = Line::from(Span::styled(
-        " ↑↓←→ navigate matrix · Enter switch · D start/restart daemon · r refresh ",
-        Style::default().fg(Color::Gray),
-    ));
-    f.render_widget(Paragraph::new(line), area);
-}
-
 fn family_label(f: EngineFamily) -> &'static str {
     match f {
         EngineFamily::Whisper => "Whisper",
@@ -774,4 +826,23 @@ fn selected_actionable_variant(app: &App) -> Option<Variant> {
         return None;
     }
     Some(v)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn legend_wraps_between_entries_never_inside_one() {
+        for width in [20, 40, 56, 80, 200] {
+            let lines = legend_lines(width);
+            assert_eq!(lines.join("  "), LEGEND.join("  "), "width {width}");
+            for line in &lines {
+                assert!(
+                    common::str_width(line) <= width || LEGEND.contains(&line.as_str()),
+                    "{line:?} overflows {width}"
+                );
+            }
+        }
+    }
 }

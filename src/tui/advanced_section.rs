@@ -3,15 +3,15 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct AdvancedState {
@@ -214,13 +214,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.advanced {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Advanced");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "Advanced");
             return;
         }
     };
@@ -269,6 +263,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "Advanced",
         state.dirty_since_load,
         feedback_pair,
@@ -278,16 +273,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
+    common::on_off(b)
 }
 
 fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text, theme::heading()))
 }
 
 fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
@@ -431,7 +421,7 @@ fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
             Line::from(Span::styled(
                 "Run `vulkaninfo --summary` or `nvidia-smi -L` to see your \
                  device numbering.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         Field::Streaming => vec![
@@ -439,9 +429,7 @@ fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "EXPERIMENTAL in 0.7.2 — Parakeet only.",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                theme::warn().add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(
@@ -483,7 +471,7 @@ fn guidance_for_field(state: &AdvancedState) -> Vec<Line<'_>> {
                 "Requires a streaming-capable model (TDT v3 family with \
                  tokenizer.model). Voxtype prints a clear error at daemon \
                  start if the active model can't stream.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
     }

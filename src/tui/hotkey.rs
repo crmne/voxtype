@@ -3,9 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -15,6 +14,7 @@ use super::common::{
 };
 use super::compositor_bindings;
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 /// In-memory copy of the hotkey state, owned by `App`. Edits mutate this; `s`
 /// commits via [`ConfigEditor`] and rolls back on validation error.
@@ -327,14 +327,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.hotkey {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Hotkey");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "Hotkey");
             return;
         }
     };
@@ -347,7 +340,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         FormRowSpec::new(
             state.field == Field::Enabled,
             "Built-in evdev listener",
-            if state.enabled { "enabled" } else { "disabled" },
+            if state.enabled { "On" } else { "Off" },
         ),
         FormRowSpec::new(
             state.field == Field::Key,
@@ -372,7 +365,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Cancel key",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::CancelKey => e.input.caret_string(),
-                _ => state.cancel_key.as_deref().unwrap_or("(none)").to_string(),
+                _ => state
+                    .cancel_key
+                    .as_deref()
+                    .unwrap_or(common::NOT_SET)
+                    .to_string(),
             },
         )
         .dimmed(greyout),
@@ -381,7 +378,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Modifier (secondary model)",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::Modifier => e.input.caret_string(),
-                _ => state.modifier.as_deref().unwrap_or("(none)").to_string(),
+                _ => state
+                    .modifier
+                    .as_deref()
+                    .unwrap_or(common::NOT_SET)
+                    .to_string(),
             },
         )
         .dimmed(greyout),
@@ -397,6 +398,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "Hotkey",
         state.dirty_since_load,
         feedback_pair,
@@ -424,12 +426,7 @@ fn guidance_for_field(state: &HotkeyState) -> Vec<Line<'_>> {
 }
 
 fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text, theme::heading()))
 }
 
 fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
@@ -448,11 +445,11 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         ),
         Line::from(Span::styled(
             "    voxtype record start    voxtype record stop",
-            Style::default().fg(Color::Gray),
+            theme::muted(),
         )),
         Line::from(Span::styled(
             "    voxtype record toggle   voxtype record cancel",
-            Style::default().fg(Color::Gray),
+            theme::muted(),
         )),
         Line::from(""),
     ];
@@ -461,9 +458,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
     if !bindings.is_empty() {
         lines.push(Line::from(Span::styled(
             "Compositor bindings detected",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::heading(),
         )));
         for b in &bindings {
             let file = b.source.file_name().and_then(|s| s.to_str()).unwrap_or("");
@@ -473,7 +468,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
             )));
             lines.push(Line::from(Span::styled(
                 format!("      from {}", file),
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )));
         }
         lines.push(Line::from(""));
@@ -481,7 +476,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         lines.push(Line::from(Span::styled(
             "No compositor bindings detected — voxtype will not receive any \
              PTT key events.",
-            Style::default().fg(Color::Red),
+            theme::error(),
         )));
         lines.push(Line::from(""));
     }
@@ -512,9 +507,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         let comp = compositor_bindings::dominant_compositor(&bindings);
         lines.push(Line::from(Span::styled(
             format!("Suggested additions ({} format)", comp.name()),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
+            theme::heading(),
         )));
         lines.push(Line::from(""));
         for s in &suggestions {
@@ -526,7 +519,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
             for cfg in &s.config_lines {
                 lines.push(Line::from(Span::styled(
                     format!("    {}", cfg),
-                    Style::default().fg(Color::Gray),
+                    theme::muted(),
                 )));
             }
             lines.push(Line::from(""));
@@ -536,7 +529,7 @@ fn guidance_enabled<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
     if !state.enabled {
         lines.push(Line::from(Span::styled(
             "Compositor mode active: the rest of this section is ignored.",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )));
     }
     lines
@@ -560,14 +553,14 @@ fn guidance_key<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         Line::from(Span::styled(
             "Custom keys can be set in config.toml directly using KEY_* \
              names from <linux/input-event-codes.h>.",
-            Style::default().fg(Color::Gray),
+            theme::muted(),
         )),
     ];
     if !state.enabled {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "(Ignored: evdev listener is disabled.)",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )));
     }
     lines
@@ -599,7 +592,7 @@ fn guidance_mode<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "(Ignored: evdev listener is disabled.)",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )));
     }
     lines
@@ -621,16 +614,16 @@ fn guidance_cancel<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         ),
         Line::from(""),
         Line::from(Span::styled(
-            "(none) leaves cancellation off — kill the recording with \
+            "Not set leaves cancellation off — kill the recording with \
              `voxtype record cancel` instead.",
-            Style::default().fg(Color::Gray),
+            theme::muted(),
         )),
     ];
     if !state.enabled {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "(Ignored: evdev listener is disabled.)",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )));
     }
     lines
@@ -651,16 +644,16 @@ fn guidance_modifier<'a>(state: &'a HotkeyState) -> Vec<Line<'a>> {
         ),
         Line::from(""),
         Line::from(Span::styled(
-            "(none) disables the modifier behavior; the PTT key always uses \
+            "Not set disables the modifier behavior; the PTT key always uses \
              the primary model.",
-            Style::default().fg(Color::Gray),
+            theme::muted(),
         )),
     ];
     if !state.enabled {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "(Ignored: evdev listener is disabled.)",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )));
     }
     lines

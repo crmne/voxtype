@@ -3,9 +3,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 use std::io::Read;
@@ -18,6 +17,7 @@ use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 use crate::audio::devices::enumerate_input_devices;
 use crate::config::AudioConfig;
 
@@ -436,14 +436,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.audio {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Audio");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "Audio");
             return;
         }
     };
@@ -491,7 +484,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
         FormRowSpec::new(
             state.field == Field::FeedbackEnabled,
             "Audio feedback sounds",
-            if state.feedback_enabled { "on" } else { "off" },
+            if state.feedback_enabled { "On" } else { "Off" },
         ),
         FormRowSpec::new(
             state.field == Field::FeedbackTheme,
@@ -520,6 +513,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "Audio",
         state.dirty_since_load,
         feedback_pair,
@@ -530,19 +524,14 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
 fn yesno(b: bool) -> &'static str {
     if b {
-        "yes"
+        "On"
     } else {
-        "no"
+        "Off"
     }
 }
 
 fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text, theme::heading()))
 }
 
 fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
@@ -550,14 +539,13 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
         Field::Device => {
             let count = state.device_choices.len().saturating_sub(1);
             let scan_line = match state.scan_status {
-                ScanStatus::Scanning => Line::from(Span::styled(
-                    "Scanning audio devices…",
-                    Style::default().fg(Color::Gray),
-                )),
+                ScanStatus::Scanning => {
+                    Line::from(Span::styled("Scanning audio devices…", theme::muted()))
+                }
                 ScanStatus::Failed => Line::from(Span::styled(
                     "Device scan failed or timed out — type a device name \
                      manually (Enter to edit).",
-                    Style::default().fg(Color::Yellow),
+                    theme::warn(),
                 )),
                 ScanStatus::Done => Line::from(format!(
                     "Detected {} device{} via cpal.",
@@ -608,7 +596,7 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "Uses MPRIS over the session D-Bus.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
             Line::from(""),
             Line::from(
@@ -642,7 +630,7 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "0% is silence; 34% is the default; values above 100% amplify.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         Field::DuckMediaFade => vec![
@@ -657,7 +645,7 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             Line::from(Span::styled(
                 "0 restores the old instant behaviour. The fade runs alongside \
                  capture, so it never delays the microphone.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         Field::FeedbackEnabled => vec![
@@ -671,7 +659,7 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "Sound theme and volume are only used when this is on.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         Field::FeedbackTheme => vec![
@@ -698,7 +686,7 @@ fn guidance_for_field(state: &AudioState) -> Vec<Line<'_>> {
             Line::from(Span::styled(
                 "Custom themes can point at a directory of .wav files; \
                  edit [audio.feedback] theme directly to use one.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         Field::FeedbackVolume => vec![

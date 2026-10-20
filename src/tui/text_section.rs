@@ -4,15 +4,15 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct TextState {
@@ -257,14 +257,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.text {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Text");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "Text");
             return;
         }
     };
@@ -327,6 +320,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "Text",
         state.dirty_since_load,
         feedback_pair,
@@ -346,16 +340,11 @@ fn replacement_edit_value(state: &TextState) -> String {
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
+    common::on_off(b)
 }
 
 fn heading(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text.into(), theme::heading()))
 }
 
 fn guidance(state: &TextState) -> Vec<Line<'static>> {
@@ -371,9 +360,7 @@ fn guidance(state: &TextState) -> Vec<Line<'static>> {
         return vec![
             Line::from(Span::styled(
                 header,
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                theme::warn().add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
             Line::from(
@@ -441,7 +428,7 @@ fn guidance(state: &TextState) -> Vec<Line<'static>> {
             Line::from(Span::styled(
                 "Replacements run before output. Match is case-insensitive \
                  and operates on the whole transcript text.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ];
     }

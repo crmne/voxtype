@@ -3,15 +3,15 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct WaybarState {
@@ -204,13 +204,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.waybar {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Waybar");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "Waybar");
             return;
         }
     };
@@ -256,6 +250,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "Waybar / Status",
         state.dirty_since_load,
         feedback_pair,
@@ -265,12 +260,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn heading(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text.into(), theme::heading()))
 }
 
 fn guidance(state: &WaybarState) -> Vec<Line<'static>> {
@@ -295,7 +285,7 @@ fn guidance(state: &WaybarState) -> Vec<Line<'static>> {
             Line::from(""),
             Line::from(Span::styled(
                 "Run `voxtype setup waybar` for ready-to-paste Waybar config.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         Field::IconIdle => icon_guidance(
@@ -338,7 +328,7 @@ fn icon_guidance(state: &WaybarState, label: &str, purpose: &str) -> Vec<Line<'s
         Line::from(Span::styled(
             "Press Enter or i to edit. Type any unicode glyph (emoji, Nerd \
              Font glyph, ASCII). Esc cancels.",
-            Style::default().fg(Color::Gray),
+            theme::muted(),
         )),
     ];
     if state
@@ -351,9 +341,7 @@ fn icon_guidance(state: &WaybarState, label: &str, purpose: &str) -> Vec<Line<'s
             0,
             Line::from(Span::styled(
                 "✎ Editing — Enter to commit, Esc to cancel",
-                Style::default()
-                    .fg(Color::Yellow)
-                    .add_modifier(Modifier::BOLD),
+                theme::warn().add_modifier(Modifier::BOLD),
             )),
         );
         lines.insert(1, Line::from(""));

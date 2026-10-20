@@ -11,15 +11,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 use crate::osd::style::{list_installed_styles, InstalledStyle};
 
 #[derive(Debug, Clone)]
@@ -384,13 +383,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.osd {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("OSD");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "OSD");
             return;
         }
     };
@@ -419,7 +412,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Plugin path",
             match state.editing.as_ref() {
                 Some(e) if e.field == Field::PluginPath => e.input.caret_string(),
-                _ if state.plugin_path.is_empty() => "(unset)".to_string(),
+                _ if state.plugin_path.is_empty() => common::NOT_SET.to_string(),
                 _ => state.plugin_path.clone(),
             },
         ),
@@ -492,6 +485,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "On-Screen Display",
         state.dirty_since_load,
         feedback_pair,
@@ -501,24 +495,19 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
+    common::on_off(b)
 }
 
 fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text, theme::heading()))
 }
 
 fn dim<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(text, Style::default().fg(Color::Gray)))
+    Line::from(Span::styled(text, theme::muted()))
 }
 
 fn dim_owned(text: String) -> Line<'static> {
-    Line::from(Span::styled(text, Style::default().fg(Color::Gray)))
+    Line::from(Span::styled(text, theme::muted()))
 }
 
 fn guidance_for_field(state: &OsdState) -> Vec<Line<'_>> {

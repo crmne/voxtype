@@ -8,9 +8,8 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
@@ -19,6 +18,7 @@ use super::common::{
     self, FeedbackLevel as CommonFeedback, FormRowSpec, TextInput, TextInputResult,
 };
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 use crate::config::TranscriptionEngine;
 use crate::model_catalog::{default_model, installed_models_for, model_catalog};
 use crate::setup::binary::{self, EngineFamily, InstallKind, Variant};
@@ -1058,14 +1058,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.engine {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Engine");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "Engine");
             return;
         }
     };
@@ -1093,6 +1086,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "Engine",
         state.dirty_since_load,
         feedback_pair,
@@ -1153,7 +1147,7 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                             s.to_string()
                         }
                     })
-                    .unwrap_or_else(|| "(none)".to_string()),
+                    .unwrap_or_else(|| common::NOT_SET.to_string()),
             },
         ),
         FieldId::WFlashAttention => ("Whisper · flash attention", yesno(f.w_flash_attention)),
@@ -1169,7 +1163,7 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 _ => f
                     .w_remote_endpoint
                     .clone()
-                    .unwrap_or_else(|| "(unset)".to_string()),
+                    .unwrap_or_else(|| common::NOT_SET.to_string()),
             },
         ),
         FieldId::WRemoteApiKey => (
@@ -1177,7 +1171,7 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
             match state.editing.as_ref() {
                 Some(e) if e.field == FieldId::WRemoteApiKey => mask(&e.input.caret_string()),
                 _ => match f.w_remote_api_key.as_deref() {
-                    None | Some("") => "(unset)".to_string(),
+                    None | Some("") => common::NOT_SET.to_string(),
                     Some(_) => "•••••• (set; press Enter to edit)".to_string(),
                 },
             },
@@ -1189,7 +1183,7 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
                 _ => f
                     .w_remote_model
                     .clone()
-                    .unwrap_or_else(|| "(unset)".to_string()),
+                    .unwrap_or_else(|| common::NOT_SET.to_string()),
             },
         ),
 
@@ -1314,7 +1308,7 @@ fn field_label_value(state: &EngineState, fid: FieldId) -> (&'static str, String
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
+    common::on_off(b)
 }
 
 /// Mask a secret value for on-screen display while editing — show only the
@@ -1330,12 +1324,7 @@ fn mask(s: &str) -> String {
 }
 
 fn heading(text: impl Into<String>) -> Line<'static> {
-    Line::from(Span::styled(
-        text.into(),
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text.into(), theme::heading()))
 }
 
 fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
@@ -1346,9 +1335,7 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
     if let Some(target) = state.pending_variant_switch {
         lines.push(Line::from(Span::styled(
             "⚠ Binary switch required",
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
+            theme::warn().add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(format!(
             "This engine needs the {} family. Saving will also switch the binary to:",
@@ -1356,17 +1343,17 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
         )));
         lines.push(Line::from(Span::styled(
             format!("    {} ({})", target.display(), target.binary_name()),
-            Style::default().fg(Color::Cyan),
+            theme::info(),
         )));
         lines.push(Line::from(Span::styled(
             "    Press s to save; pkexec will prompt for sudo.",
-            Style::default().fg(Color::Gray),
+            theme::muted(),
         )));
         lines.push(Line::from(""));
     } else if let Some(reason) = state.binary_switch_blocked {
         lines.push(Line::from(Span::styled(
             "⚠ Cannot switch binary",
-            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            theme::error().add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(reason.to_string()));
         lines.push(Line::from(""));
@@ -1422,7 +1409,7 @@ fn engine_guidance(state: &EngineState) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled(
         "Engine choice and binary family are linked. The TUI will swap \
          the binary for you when needed.",
-        Style::default().fg(Color::Gray),
+        theme::muted(),
     )));
     lines
 }
@@ -1488,7 +1475,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
             Line::from(Span::styled(
                 "Multi-language allowlists (e.g. \"en,fr,de\") can be set in \
                  config.toml as an array.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         FieldId::WTranslate => vec![
@@ -1536,7 +1523,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
                     "Press Enter or i to edit. While editing: type to insert, \
                      Backspace/Delete to remove, Enter commits, Esc cancels. \
                      Ctrl-W deletes the previous word; Ctrl-U clears the line.",
-                    Style::default().fg(Color::Gray),
+                    theme::muted(),
                 )),
             ];
             if state
@@ -1548,9 +1535,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
                     0,
                     Line::from(Span::styled(
                         "✎ Editing — Enter to commit, Esc to cancel",
-                        Style::default()
-                            .fg(Color::Yellow)
-                            .add_modifier(Modifier::BOLD),
+                        theme::warn().add_modifier(Modifier::BOLD),
                     )),
                 );
                 lines.insert(1, Line::from(""));
@@ -1631,7 +1616,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "Leave at auto-detect unless you have reason to override.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         FieldId::PkOnDemandLoading => vec![
@@ -1749,7 +1734,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "English-only .en models ignore this setting. Choose a multilingual model for other languages.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         FieldId::OvThreads => vec![
@@ -1776,7 +1761,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "Press Enter to edit. Esc cancels.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         FieldId::WRemoteApiKey => vec![
@@ -1795,7 +1780,7 @@ fn guidance(state: &EngineState) -> Vec<Line<'_>> {
             Line::from(""),
             Line::from(Span::styled(
                 "Press Enter to edit. Display is masked while not editing.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         FieldId::WRemoteModel => vec![
@@ -1861,7 +1846,7 @@ fn openvino_device_guidance(device: &str) -> Vec<Line<'static>> {
         ),
         Line::from(Span::styled(
             "The pip wheel and openvino-genai-bin do not ship the required libopenvino_genai_c.so C API library.",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )),
     ]
 }
@@ -1892,11 +1877,9 @@ fn model_guidance(engine: &str, current: &str) -> Vec<Line<'static>> {
             let marker = if inst { "●" } else { "·" };
             let suffix = if inst { "" } else { "  (not downloaded)" };
             let style = if !inst {
-                Style::default().fg(Color::Gray)
+                theme::muted()
             } else if active {
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD)
+                theme::heading()
             } else {
                 Style::default()
             };
@@ -1910,14 +1893,14 @@ fn model_guidance(engine: &str, current: &str) -> Vec<Line<'static>> {
     lines.push(Line::from(Span::styled(
         "Models you haven't downloaded yet show up here too. Switch to one, \
          save, then run `voxtype setup model` to fetch the weights.",
-        Style::default().fg(Color::Gray),
+        theme::muted(),
     )));
     if engine == "cohere" {
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
             "⚠ Cohere's int8 model is ~3 GB on disk — heaviest of the bundled \
              engines. Make sure you've got the space before downloading.",
-            Style::default().fg(Color::Yellow),
+            theme::warn(),
         )));
     }
     lines

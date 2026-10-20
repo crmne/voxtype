@@ -1,12 +1,13 @@
 //! Terminal UI for `voxtype configure`.
 //!
-//! Renders an interactive view over voxtype settings. The General section
-//! (variant picker + daemon status) is functional today; remaining sections
-//! ship as placeholders and will be filled in over subsequent PRs.
+//! A section list on the left, the open section on the right, a header rule
+//! naming the config file and daemon, and a footer of keys for whatever has
+//! focus. See `docs/TUI_DESIGN.md` for the design this follows.
 
 mod advanced_section;
 mod app;
 mod audio;
+mod chrome;
 mod common;
 mod compositor_bindings;
 mod config_editor;
@@ -20,6 +21,7 @@ mod output_section;
 mod section;
 mod sidebar;
 mod text_section;
+mod theme;
 mod vad_section;
 mod waybar_section;
 
@@ -40,9 +42,6 @@ use crossterm::{
 use ratatui::{
     backend::CrosstermBackend,
     layout::{Constraint, Direction, Layout, Rect},
-    style::{Color, Style},
-    text::{Line, Span},
-    widgets::Paragraph,
     Frame, Terminal,
 };
 use std::io::{self, Stdout};
@@ -152,7 +151,8 @@ fn event_loop(terminal: &mut Tui, force_package_mode: bool) -> anyhow::Result<bo
                 }
             }
             Event::Mouse(mouse) => {
-                handle_mouse(&mut app, mouse);
+                let size = terminal.size()?;
+                handle_mouse(&mut app, mouse, Rect::new(0, 0, size.width, size.height));
             }
             _ => {}
         }
@@ -170,11 +170,10 @@ fn dispatch_action(
     action: Action,
 ) -> anyhow::Result<LoopControl> {
     match action {
-        // Quit goes through a save-on-exit prompt when any section has been
-        // loaded (the user might have unsaved field edits). If nothing is
-        // loaded, exit immediately — no edits possible.
+        // Quit asks first only when some section holds unsaved edits, and
+        // names them. Browsing, or quitting after saving, exits at once.
         Action::Quit => {
-            if app.any_section_loaded() {
+            if !app.dirty_sections().is_empty() {
                 app.quit_pending = true;
                 Ok(LoopControl::Continue)
             } else {
@@ -182,7 +181,7 @@ fn dispatch_action(
             }
         }
         // ForceQuit is the prompt's resolved-decision exit: the user already
-        // chose Save or Discard, so skip the any_section_loaded re-check that
+        // chose Save or Discard, so skip the dirty-sections re-check that
         // would otherwise re-open the prompt and loop forever.
         Action::ForceQuit => Ok(LoopControl::Quit),
         Action::SwitchVariant(variant) => {
@@ -282,16 +281,24 @@ fn restart_if_config_newer(app: &App) -> bool {
 
 /// Routes keypresses while the save-on-exit prompt is showing.
 ///
-/// - `s` save every loaded section's current field values, then quit.
+/// - `s` / Enter save every section with unsaved edits, then quit. A save
+///   that fails keeps the TUI open on that section, where its status line
+///   shows the error, rather than quitting with the edit lost.
 /// - `d` discard: quit without saving.
 /// - `c` or `Esc` cancel: dismiss the prompt and stay in the TUI.
 /// - anything else is swallowed.
 fn handle_quit_prompt_key(app: &mut App, key: KeyEvent) -> Action {
     match key.code {
         KeyCode::Char('s') | KeyCode::Char('S') | KeyCode::Enter => {
-            app.save_all_loaded_sections();
             app.quit_pending = false;
-            Action::ForceQuit
+            let failed = app.save_dirty_sections();
+            match failed.first() {
+                None => Action::ForceQuit,
+                Some(section) => {
+                    app.jump_to_section(*section);
+                    Action::None
+                }
+            }
         }
         KeyCode::Char('d') | KeyCode::Char('D') => {
             app.quit_pending = false;
@@ -302,6 +309,19 @@ fn handle_quit_prompt_key(app: &mut App, key: KeyEvent) -> Action {
             Action::None
         }
         _ => Action::None,
+    }
+}
+
+/// Keys while the help overlay is open: arrows and paging scroll it, any
+/// other key closes it.
+fn handle_help_key(app: &mut App, key: KeyEvent) {
+    let scroll = app.help_scroll.get();
+    match key.code {
+        KeyCode::Down | KeyCode::Char('j') => app.help_scroll.set(scroll.saturating_add(1)),
+        KeyCode::Up | KeyCode::Char('k') => app.help_scroll.set(scroll.saturating_sub(1)),
+        KeyCode::PageDown | KeyCode::Char(' ') => app.help_scroll.set(scroll.saturating_add(10)),
+        KeyCode::PageUp => app.help_scroll.set(scroll.saturating_sub(10)),
+        _ => app.help_open = false,
     }
 }
 
@@ -320,13 +340,13 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         return Some(handle_quit_prompt_key(app, key));
     }
 
-    // Help overlay: any key dismisses it (including ?).
     if app.help_open {
-        app.help_open = false;
+        handle_help_key(app, key);
         return Some(Action::None);
     }
     if matches!(key.code, KeyCode::Char('?')) {
         app.help_open = true;
+        app.help_scroll.set(0);
         return Some(Action::None);
     }
 
@@ -341,7 +361,17 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> Option<Action> {
             app.jump_to_section(Section::General);
             Some(Action::None)
         }
-        (KeyCode::Tab, _) => {
+        (KeyCode::PageDown, _) => {
+            let s = app.guidance_scroll.get();
+            app.guidance_scroll.set(s.saturating_add(5));
+            Some(Action::None)
+        }
+        (KeyCode::PageUp, _) => {
+            let s = app.guidance_scroll.get();
+            app.guidance_scroll.set(s.saturating_sub(5));
+            Some(Action::None)
+        }
+        (KeyCode::Tab, _) | (KeyCode::BackTab, _) => {
             if app.sidebar_focused {
                 app.focus_content();
             } else {
@@ -367,11 +397,13 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Action {
         KeyCode::Up | KeyCode::Char('k') => {
             app.move_sidebar(-1);
             app.open_hovered_section();
+            app.guidance_scroll.set(0);
             Action::None
         }
         KeyCode::Down | KeyCode::Char('j') => {
             app.move_sidebar(1);
             app.open_hovered_section();
+            app.guidance_scroll.set(0);
             Action::None
         }
         KeyCode::Enter | KeyCode::Right | KeyCode::Char('l') => {
@@ -383,35 +415,82 @@ fn handle_sidebar_key(app: &mut App, key: KeyEvent) -> Action {
     }
 }
 
-fn handle_mouse(app: &mut App, mouse: MouseEvent) {
-    // Ignore mouse input while help overlay is open or a text field is editing.
-    if app.help_open || app.is_editing() {
+/// Screen regions, computed once so drawing and mouse hit-testing agree.
+struct ScreenLayout {
+    header: Rect,
+    banner: Rect,
+    sidebar: Rect,
+    content: Rect,
+    footer: Rect,
+}
+
+fn screen_layout(area: Rect, app: &App) -> ScreenLayout {
+    // The variant-mismatch banner sits between the header and the body so
+    // it stays visible on every section, not only General. See #450.
+    let banner_height = if app.variant_mismatch.is_some() { 2 } else { 0 };
+    let [header, banner, body, footer] = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1),
+            Constraint::Length(banner_height),
+            Constraint::Min(0),
+            Constraint::Length(1),
+        ])
+        .areas(area);
+    let [sidebar, content] = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Length(sidebar::WIDTH), Constraint::Min(0)])
+        .areas(body);
+    ScreenLayout {
+        header,
+        banner,
+        sidebar,
+        content,
+        footer,
+    }
+}
+
+fn handle_mouse(app: &mut App, mouse: MouseEvent, screen: Rect) {
+    // Ignore mouse input while an overlay is open or a text field is editing.
+    if app.help_open || app.quit_pending || app.is_editing() {
         return;
     }
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
         return;
     }
+    let layout = screen_layout(screen, app);
+    let (col, row) = (mouse.column, mouse.row);
+    let inside = |r: Rect| col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height;
 
-    let col = mouse.column;
-    let row = mouse.row;
-
-    // Title bar occupies row 0; sidebar inner rows begin at absolute row 1.
-    if col < sidebar::WIDTH && row >= 1 {
-        let idx = (row - 1) as usize;
-        if idx < Section::ALL.len() {
-            app.sidebar_cursor = idx;
-            app.open_hovered_section();
-            app.focus_sidebar();
+    if inside(layout.sidebar) {
+        // Inner rows start one below the pane's top border.
+        let inner_height = layout.sidebar.height.saturating_sub(2);
+        let line = row.saturating_sub(layout.sidebar.y + 1);
+        if row > layout.sidebar.y {
+            if let Some(idx) = sidebar::item_at(inner_height, sidebar::focus_index(app), line) {
+                app.sidebar_cursor = idx;
+                app.open_hovered_section();
+                app.guidance_scroll.set(0);
+            }
         }
+        app.focus_sidebar();
         return;
     }
-
-    if col >= sidebar::WIDTH {
+    if inside(layout.content) {
         app.focus_content();
     }
 }
 
 fn handle_section_key(app: &mut App, key: KeyEvent) -> Action {
+    // Moving to another setting starts its explanation from the top.
+    if !app.is_editing()
+        && matches!(
+            key.code,
+            KeyCode::Up | KeyCode::Down | KeyCode::Char('j') | KeyCode::Char('k')
+        )
+    {
+        app.guidance_scroll.set(0);
+    }
     match app.current_section {
         Section::General => general::handle_key(app, key),
         Section::Hotkey => hotkey::handle_key(app, key),
@@ -429,271 +508,27 @@ fn handle_section_key(app: &mut App, key: KeyEvent) -> Action {
 }
 
 fn draw(f: &mut Frame, app: &App) {
-    // Reserve a row for the variant-mismatch banner when it's active. Slotting
-    // it between the title and the sidebar/content split means it stays
-    // visible no matter which section the user is on, which is the whole
-    // point — the General section's existing model-missing banner sits
-    // *inside* its section pane and disappears when the user navigates
-    // away. See #450.
-    let banner_height = if app.variant_mismatch.is_some() { 2 } else { 0 };
-    let outer = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),             // title bar
-            Constraint::Length(banner_height), // variant-mismatch banner (0 when absent)
-            Constraint::Min(0),                // body (sidebar + content)
-            Constraint::Length(1),             // footer / help
-        ])
-        .split(f.area());
-
-    render_title(f, outer[0]);
-    if app.variant_mismatch.is_some() {
-        render_variant_mismatch_banner(f, outer[1], app);
+    let area = f.area();
+    if area.width < chrome::MIN_WIDTH || area.height < chrome::MIN_HEIGHT {
+        chrome::render_too_small(f, area);
+        return;
     }
+    let layout = screen_layout(area, app);
 
-    let body = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Length(sidebar::WIDTH), Constraint::Min(0)])
-        .split(outer[2]);
-
-    sidebar::render(f, body[0], app);
-    render_section(f, body[1], app);
-
-    render_footer(f, outer[3], app);
+    chrome::render_header(f, layout.header);
+    if app.variant_mismatch.is_some() {
+        chrome::render_variant_mismatch_banner(f, layout.banner, app);
+    }
+    sidebar::render(f, layout.sidebar, app);
+    render_section(f, layout.content, app);
+    chrome::render_footer(f, layout.footer, app);
 
     if app.help_open {
-        render_help_overlay(f);
+        chrome::render_help_overlay(f, app);
     }
     if app.quit_pending {
-        render_quit_prompt(f);
+        chrome::render_quit_prompt(f, app);
     }
-}
-
-fn render_quit_prompt(f: &mut Frame) {
-    let area = f.area();
-    let w = 60.min(area.width.saturating_sub(4));
-    let h = 7.min(area.height.saturating_sub(2));
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-
-    f.render_widget(ratatui::widgets::Clear, rect);
-
-    let block = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow))
-        .title(" Save before quitting? ");
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-
-    let lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            "  s  Save and quit",
-            Style::default().fg(Color::Green),
-        )),
-        Line::from(Span::styled(
-            "  d  Discard and quit",
-            Style::default().fg(Color::Red),
-        )),
-        Line::from(Span::styled(
-            "  c / Esc  Cancel",
-            Style::default().fg(Color::Gray),
-        )),
-    ];
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_help_overlay(f: &mut Frame) {
-    let area = f.area();
-    // Centered modal: ~70% width, ~85% height, capped at 78x30.
-    let w = area.width.saturating_sub(8).min(78);
-    let h = area.height.saturating_sub(4).min(30);
-    let x = area.x + area.width.saturating_sub(w) / 2;
-    let y = area.y + area.height.saturating_sub(h) / 2;
-    let rect = Rect {
-        x,
-        y,
-        width: w,
-        height: h,
-    };
-
-    // Clear under the modal so it overpaints whatever's behind.
-    f.render_widget(ratatui::widgets::Clear, rect);
-
-    let block = ratatui::widgets::Block::default()
-        .borders(ratatui::widgets::Borders::ALL)
-        .border_style(Style::default().fg(Color::Cyan))
-        .title(" Voxtype Configuration — Help ");
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-
-    let bold = Style::default().add_modifier(ratatui::style::Modifier::BOLD);
-    let dim = Style::default().fg(Color::Gray);
-
-    let lines = vec![
-        Line::from(Span::styled("Global", bold)),
-        Line::from("  Tab          Toggle focus between sidebar and section"),
-        Line::from("  Esc          Sidebar focus / quit from sidebar"),
-        Line::from("  q, Ctrl-C    Quit"),
-        Line::from("  ?            Toggle this help"),
-        Line::from("  F2           Jump to General (variant picker)"),
-        Line::from(""),
-        Line::from(Span::styled("Sidebar", bold)),
-        Line::from("  ↑↓ / jk      Navigate sections"),
-        Line::from("  Enter, →, l  Open section / focus content"),
-        Line::from(""),
-        Line::from(Span::styled("General section", bold)),
-        Line::from("  ↑↓←→ / hjkl Navigate variant matrix"),
-        Line::from("  Enter        Switch to variant under cursor"),
-        Line::from("  D            Start or restart the voxtype daemon"),
-        Line::from("  r            Refresh inventory"),
-        Line::from(""),
-        Line::from(Span::styled("Section forms", bold)),
-        Line::from("  ↑↓ / jk      Navigate fields"),
-        Line::from("  ←→ / hl      Cycle field value"),
-        Line::from("  Space        Toggle / advance"),
-        Line::from("  Enter, i     Edit text field"),
-        Line::from("  s            Save changes to config.toml"),
-        Line::from("  r            Revert unsaved changes"),
-        Line::from(""),
-        Line::from(Span::styled("Inline text editing", bold)),
-        Line::from("  type         Insert at cursor"),
-        Line::from("  ←→           Move cursor"),
-        Line::from("  Home / End   Beginning / end of line"),
-        Line::from("  Backspace    Delete previous char"),
-        Line::from("  Delete       Delete next char"),
-        Line::from("  Ctrl-W       Delete previous word"),
-        Line::from("  Ctrl-U       Clear line"),
-        Line::from("  Enter        Commit"),
-        Line::from("  Esc, Ctrl-C  Cancel"),
-        Line::from(""),
-        Line::from(Span::styled("Press any key to dismiss.", dim)),
-    ];
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-fn render_title(f: &mut Frame, area: Rect) {
-    // The version shown is the *daemon's*, not this TUI's. Someone editing
-    // settings wants to know what will act on them, and after an upgrade
-    // that was installed but never restarted those are different numbers.
-    // Showing the TUI's own build here would quietly answer the wrong
-    // question.
-    let daemon = crate::daemon_status::running_version();
-    let (version_text, version_style) = match &daemon {
-        crate::daemon_status::DaemonVersion::Running(v) if daemon.differs_from_caller() => (
-            format!("daemon {} · this TUI {}", v, crate::cli::VERSION),
-            Style::default().fg(Color::Yellow),
-        ),
-        crate::daemon_status::DaemonVersion::Running(v) => (
-            format!("daemon {}", v),
-            Style::default().fg(Color::DarkGray),
-        ),
-        crate::daemon_status::DaemonVersion::NotRunning => (
-            "daemon not running".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-        crate::daemon_status::DaemonVersion::Unknown => (
-            "daemon running, version unknown".to_string(),
-            Style::default().fg(Color::DarkGray),
-        ),
-    };
-
-    let line = Line::from(vec![
-        Span::raw(" Voxtype Configuration"),
-        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            "edit settings without leaving the terminal",
-            Style::default().fg(Color::DarkGray),
-        ),
-        Span::styled("  ·  ", Style::default().fg(Color::DarkGray)),
-        Span::styled(version_text, version_style),
-    ]);
-    f.render_widget(Paragraph::new(line), area);
-}
-
-/// Persistent two-line banner shown at the top of every section when the
-/// running binary can't service the configured engine (see #450). The
-/// emoji-free, monochrome-bright style matches the existing TUI feedback
-/// banners (yellow accent, plain ASCII glyphs) so it renders the same in
-/// any palette.
-fn render_variant_mismatch_banner(f: &mut Frame, area: Rect, app: &App) {
-    use crate::setup::variant_check::Remediation;
-    let Some(m) = app.variant_mismatch.as_ref() else {
-        return;
-    };
-    let warn = Style::default().fg(Color::Yellow);
-    let dim = Style::default().fg(Color::DarkGray);
-    let bold = Style::default()
-        .fg(Color::Yellow)
-        .add_modifier(ratatui::style::Modifier::BOLD);
-
-    let active = m
-        .active_variant_name
-        .as_deref()
-        .unwrap_or("the running binary");
-
-    let line1 = Line::from(vec![
-        Span::styled(" ! ", bold),
-        Span::styled("engine = ", warn),
-        Span::styled(m.configured_engine, bold),
-        Span::styled(" but ", warn),
-        Span::styled(active, bold),
-        Span::styled(" was built without ", warn),
-        Span::styled(format!("--features {}", m.required_feature), bold),
-    ]);
-
-    let line2 = match &m.remediation {
-        Remediation::SwitchToVariant { target } => Line::from(vec![
-            Span::styled("   Fix: press ", dim),
-            Span::styled("F2", warn),
-            Span::styled(" to open the variant picker, or run ", dim),
-            Span::styled("sudo voxtype setup onnx --enable", warn),
-            Span::styled(format!("  (recommended: {})", target.binary_name()), dim),
-        ]),
-        Remediation::Rebuild { feature } => Line::from(vec![
-            Span::styled("   Fix: rebuild voxtype with ", dim),
-            Span::styled(format!("--features {}", feature), warn),
-        ]),
-    };
-
-    f.render_widget(Paragraph::new(vec![line1, line2]), area);
-}
-
-fn render_footer(f: &mut Frame, area: Rect, app: &App) {
-    // Global keymap shown in every state. Section forms add `s save · r revert`
-    // when the right pane is focused on an editable section. General has
-    // `R restart daemon` instead.
-    let global = " ? help · q quit ";
-
-    let line = if app.sidebar_focused {
-        let summary = Section::ALL
-            .get(app.sidebar_cursor)
-            .map(|s| s.summary())
-            .unwrap_or("");
-        Line::from(vec![
-            Span::styled(
-                format!(" ↑↓ navigate · Enter open · Tab content ·{}", global),
-                Style::default().fg(Color::Gray),
-            ),
-            Span::styled(format!("│  {}", summary), Style::default().fg(Color::Cyan)),
-        ])
-    } else {
-        let section_keys = match app.current_section {
-            Section::General => " D start/restart daemon · r refresh ",
-            _ => " s save · r revert ",
-        };
-        Line::from(Span::styled(
-            format!(" Tab/Esc sidebar ·{}·{}", section_keys, global),
-            Style::default().fg(Color::Gray),
-        ))
-    };
-    f.render_widget(Paragraph::new(line), area);
 }
 
 fn render_section(f: &mut Frame, area: Rect, app: &App) {

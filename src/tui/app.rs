@@ -2,6 +2,8 @@
 
 use crate::setup::binary::{self, Acceleration, EngineFamily, InstallKind, Inventory, Variant};
 use crate::setup::variant_check::{self, VariantMismatch};
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 use std::path::Path;
 
 use super::advanced_section::AdvancedState;
@@ -84,6 +86,17 @@ pub struct App {
     pub sidebar_focused: bool,
     /// `?` toggles a centered help overlay listing every keybinding.
     pub help_open: bool,
+    /// First visible line of the help overlay, for terminals too short to
+    /// show it whole.
+    pub help_scroll: Cell<u16>,
+    /// First visible line of the About pane. PgUp/PgDn move it, moving to
+    /// another field resets it, and rendering clamps it to the text.
+    pub guidance_scroll: Cell<u16>,
+    /// Each form section's values as last saved (or loaded), keyed by
+    /// section title then row label. Rendering fills it while a section is
+    /// clean and compares against it once it is dirty, which is how unsaved
+    /// rows get their marker. Presentation only; nothing is saved from it.
+    pub baselines: RefCell<HashMap<String, HashMap<String, String>>>,
     /// True while the save-on-exit prompt is showing. Cleared when the user
     /// picks Save (s), Discard (d), or Cancel (Esc/c).
     pub quit_pending: bool,
@@ -169,6 +182,9 @@ impl App {
             sidebar_cursor: 0,
             sidebar_focused: true,
             help_open: false,
+            help_scroll: Cell::new(0),
+            guidance_scroll: Cell::new(0),
+            baselines: RefCell::new(HashMap::new()),
             quit_pending: false,
             missing_model: detect_missing_model(),
             variant_mismatch,
@@ -269,6 +285,42 @@ impl App {
         self.sidebar_focused = false;
     }
 
+    /// True when keys go to the open section rather than the sidebar.
+    pub fn content_focused(&self) -> bool {
+        !self.sidebar_focused
+    }
+
+    /// True when `section` holds edits that are not in the config file yet.
+    /// General has nothing to save, so it is never dirty.
+    pub fn section_dirty(&self, section: Section) -> bool {
+        match section {
+            Section::General => false,
+            Section::Engine => self.engine.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Hotkey => self.hotkey.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Audio => self.audio.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Output => self.output.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Text => self.text.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Vad => self.vad.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Meeting => self.meeting.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Notifications => self
+                .notifications
+                .as_ref()
+                .is_some_and(|s| s.dirty_since_load),
+            Section::Osd => self.osd.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.dirty_since_load),
+            Section::Advanced => self.advanced.as_ref().is_some_and(|s| s.dirty_since_load),
+        }
+    }
+
+    /// Sections with unsaved edits, in sidebar order.
+    pub fn dirty_sections(&self) -> Vec<Section> {
+        Section::ALL
+            .iter()
+            .copied()
+            .filter(|s| self.section_dirty(*s))
+            .collect()
+    }
+
     /// True when a section is in inline-edit mode and should swallow keys
     /// instead of letting global shortcuts (Esc, Tab, q) act on them.
     pub fn is_editing(&self) -> bool {
@@ -279,6 +331,7 @@ impl App {
             Section::Audio => self.audio.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Waybar => self.waybar.as_ref().is_some_and(|s| s.editing.is_some()),
             Section::Osd => self.osd.as_ref().is_some_and(|s| s.editing.is_some()),
+            Section::Text => self.text.as_ref().is_some_and(|s| s.editing.is_some()),
             _ => false,
         }
     }
@@ -298,77 +351,51 @@ impl App {
         self.variant_mismatch = detect_variant_mismatch(&self.inventory);
     }
 
-    /// True when at least one section state has been loaded — the user has
-    /// visited that section, so it might hold unsaved field edits. Used to
-    /// gate the save-on-exit prompt so users who only browse don't get
-    /// asked.
-    pub fn any_section_loaded(&self) -> bool {
-        self.hotkey.is_some()
-            || self.audio.is_some()
-            || self.engine.is_some()
-            || self.output.is_some()
-            || self.text.is_some()
-            || self.vad.is_some()
-            || self.meeting.is_some()
-            || self.notifications.is_some()
-            || self.osd.is_some()
-            || self.waybar.is_some()
-            || self.advanced.is_some()
-    }
-
-    /// Save every loaded section to disk. Walks each Option<State> and calls
-    /// the same `save()` path the `s` keybinding uses. Each section reloads
-    /// the on-disk config, applies its current field values, validates, and
-    /// atomically renames — sequential calls compose because each reload sees
-    /// the prior save's output. Returns the count of sections saved so the
-    /// caller can show a feedback line.
-    pub fn save_all_loaded_sections(&mut self) -> usize {
-        let mut count = 0;
-        if let Some(s) = self.hotkey.as_mut() {
-            s.save();
-            count += 1;
+    /// Save every section with unsaved edits, through the same `save()` the
+    /// `s` key uses. Each save reloads the file, applies its section, and
+    /// validates before renaming, so sequential saves compose. Sections whose
+    /// save fails stay dirty and keep their error in their status line;
+    /// they are returned so the caller can keep the user in the TUI.
+    pub fn save_dirty_sections(&mut self) -> Vec<Section> {
+        for section in self.dirty_sections() {
+            match section {
+                Section::General => {}
+                Section::Engine => {
+                    let _ = self.engine.as_mut().map(|s| s.save());
+                }
+                Section::Hotkey => {
+                    let _ = self.hotkey.as_mut().map(|s| s.save());
+                }
+                Section::Audio => {
+                    let _ = self.audio.as_mut().map(|s| s.save());
+                }
+                Section::Output => {
+                    let _ = self.output.as_mut().map(|s| s.save());
+                }
+                Section::Text => {
+                    let _ = self.text.as_mut().map(|s| s.save());
+                }
+                Section::Vad => {
+                    let _ = self.vad.as_mut().map(|s| s.save());
+                }
+                Section::Meeting => {
+                    let _ = self.meeting.as_mut().map(|s| s.save());
+                }
+                Section::Notifications => {
+                    let _ = self.notifications.as_mut().map(|s| s.save());
+                }
+                Section::Osd => {
+                    let _ = self.osd.as_mut().map(|s| s.save());
+                }
+                Section::Waybar => {
+                    let _ = self.waybar.as_mut().map(|s| s.save());
+                }
+                Section::Advanced => {
+                    let _ = self.advanced.as_mut().map(|s| s.save());
+                }
+            }
         }
-        if let Some(s) = self.audio.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.engine.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.output.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.text.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.vad.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.meeting.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.notifications.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.osd.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.waybar.as_mut() {
-            s.save();
-            count += 1;
-        }
-        if let Some(s) = self.advanced.as_mut() {
-            s.save();
-            count += 1;
-        }
-        count
+        self.dirty_sections()
     }
 
     /// Map a (row, col) cell to a Variant if one exists for that combination.

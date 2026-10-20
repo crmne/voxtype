@@ -3,15 +3,15 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
+    style::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FormRowSpec, TextInput, TextInputResult};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct OutputState {
@@ -265,14 +265,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.output {
         Some(s) => s,
         None => {
-            let block = Block::default().borders(Borders::ALL).title("Output");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config; check ~/.config/voxtype/config.toml.")
-                    .wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "Output");
             return;
         }
     };
@@ -322,7 +315,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
                             s.to_string()
                         }
                     })
-                    .unwrap_or_else(|| "(none)".to_string()),
+                    .unwrap_or_else(|| common::NOT_SET.to_string()),
             },
         ),
     ];
@@ -340,6 +333,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "Output",
         state.dirty_since_load,
         feedback_pair,
@@ -349,12 +343,12 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
+    common::on_off(b)
 }
 
 fn display_append(s: Option<&str>) -> String {
     match s {
-        None => "(none)".to_string(),
+        None => common::NOT_SET.to_string(),
         Some(" ") => "space".to_string(),
         Some("\n") => "newline".to_string(),
         Some(other) => format!("{:?}", other),
@@ -362,12 +356,7 @@ fn display_append(s: Option<&str>) -> String {
 }
 
 fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text, theme::heading()))
 }
 
 fn guidance_for_field(state: &OutputState) -> Vec<Line<'_>> {
@@ -492,7 +481,7 @@ fn guidance_for_field(state: &OutputState) -> Vec<Line<'_>> {
             Line::from(Span::styled(
                 "TUI cycles a few presets. Edit the command body in \
                  [post_process] command in config.toml directly.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
     }

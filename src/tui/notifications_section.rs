@@ -3,15 +3,14 @@
 use crossterm::event::{KeyCode, KeyEvent};
 use ratatui::{
     layout::Rect,
-    style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
     Frame,
 };
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec};
 use super::config_editor::{ConfigEditor, EditorError};
+use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct NotificationsState {
@@ -111,15 +110,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     let state = match &app.notifications {
         Some(s) => s,
         None => {
-            let block = Block::default()
-                .borders(Borders::ALL)
-                .title("Notifications");
-            let inner = block.inner(area);
-            f.render_widget(block, area);
-            f.render_widget(
-                Paragraph::new("Failed to load config.").wrap(Wrap { trim: true }),
-                inner,
-            );
+            common::render_load_error(f, area, "Notifications");
             return;
         }
     };
@@ -155,6 +146,7 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
     common::render_form_with_guidance(
         f,
         area,
+        app,
         "Desktop Notifications",
         state.dirty_since_load,
         feedback_pair,
@@ -164,16 +156,11 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn yesno(b: bool) -> String {
-    (if b { "yes" } else { "no" }).to_string()
+    common::on_off(b)
 }
 
 fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(
-        text,
-        Style::default()
-            .fg(Color::Cyan)
-            .add_modifier(Modifier::BOLD),
-    ))
+    Line::from(Span::styled(text, theme::heading()))
 }
 
 fn guidance_for_field(state: &NotificationsState) -> Vec<Line<'_>> {
@@ -218,7 +205,7 @@ fn guidance_for_field(state: &NotificationsState) -> Vec<Line<'_>> {
             Line::from(Span::styled(
                 "Notifications go through libnotify, so they respect mako/\
                  dunst/KDE/GNOME settings.",
-                Style::default().fg(Color::Gray),
+                theme::muted(),
             )),
         ],
         Field::ShowEngineIcon => vec![
