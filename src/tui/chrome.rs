@@ -1,5 +1,5 @@
-//! Everything around the sections: the header rule, the warning banner, the
-//! key footer, the help overlay and the unsaved-changes prompt.
+//! Everything around the pages: the status line, the key footer, the help
+//! overlay, the quit question and the too-small screen.
 
 use ratatui::{
     layout::{Alignment, Rect},
@@ -10,7 +10,7 @@ use ratatui::{
 };
 
 use super::app::App;
-use super::common::{self, str_width, truncate};
+use super::common::{self, first_that_fits, str_width, truncate, FeedbackLevel};
 use super::section::Section;
 use super::theme;
 
@@ -19,9 +19,11 @@ use super::theme;
 pub const MIN_WIDTH: u16 = 60;
 pub const MIN_HEIGHT: u16 = 16;
 
-/// Spacing between footer key groups. Plain space reads calmer than
-/// separators, and the key names already carry the accent.
+/// Spacing between footer key groups.
 const FOOTER_GAP: &str = "   ";
+
+/// Most hints the footer shows; the rest are under `?`.
+const FOOTER_MAX: usize = 6;
 
 pub fn render_too_small(f: &mut Frame, area: Rect) {
     let lines = vec![
@@ -50,241 +52,132 @@ pub fn render_too_small(f: &mut Frame, area: Rect) {
     );
 }
 
-/// The top rule: what this is and which file it edits on the left, the
-/// daemon that will act on the saved settings on the right. On narrow
-/// terminals the daemon text shortens first, then the path goes.
-///
-/// While saved settings wait for a restart, the right side says so instead,
-/// with the key that applies them, until the restart happens.
-pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
-    let (daemon_full, daemon_short, daemon_style) = if app.apply_pending.get() {
-        (
-            "! saved, not in use yet · R restarts voxtype".to_string(),
-            "! R to apply".to_string(),
-            theme::warn(),
-        )
-    } else {
-        daemon_status()
+/// What the status line says, by priority: the last save or action result,
+/// the open page's own message, the unsaved count, then what voxtype is
+/// running and which file this edits.
+pub fn status_text(app: &App, width: usize) -> (Option<FeedbackLevel>, String) {
+    if let Some((level, message)) = &app.notice {
+        return (Some(*level), message.clone());
+    }
+    if let Some((level, message)) = app.page_message() {
+        return (Some(level), message);
+    }
+    let unsaved = app.unsaved_count();
+    if unsaved > 0 {
+        let count = if unsaved == 1 {
+            "1 unsaved change".to_string()
+        } else {
+            format!("{} unsaved changes", unsaved)
+        };
+        let applies = super::app::edits_daemon_config();
+        let options = if applies {
+            vec![
+                format!("{} · s saves and restarts voxtype", count),
+                format!("{} · s saves", count),
+            ]
+        } else {
+            vec![format!("{} · s saves", count)]
+        };
+        return (
+            None,
+            format!("● {}", first_that_fits(&options, width.saturating_sub(2))),
+        );
+    }
+    let path = common::display_config_path();
+    let daemon = match crate::daemon_status::running_version() {
+        crate::daemon_status::DaemonVersion::Running(v) => format!("voxtype {} is running", v),
+        crate::daemon_status::DaemonVersion::NotRunning => "voxtype isn't running".to_string(),
+        crate::daemon_status::DaemonVersion::Unknown => "voxtype is running".to_string(),
     };
-    let line = header_line(
-        area.width as usize,
-        &common::display_config_path(),
-        &[daemon_full, daemon_short],
-        daemon_style,
-    );
+    let room = width.saturating_sub(str_width(&daemon) + 3);
+    let short_path = common::truncate_middle(&path, room.max(14));
+    (
+        None,
+        first_that_fits(
+            &[
+                format!("{} · {}", daemon, path),
+                format!("{} · {}", daemon, short_path),
+                daemon,
+            ],
+            width,
+        ),
+    )
+}
+
+/// The one status line under the page.
+pub fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
+    let area = Rect {
+        x: area.x + 1,
+        width: area.width.saturating_sub(1),
+        ..area
+    };
+    let width = area.width as usize;
+    let (level, text) = status_text(app, width);
+    let line = match level {
+        Some(level) => {
+            let (glyph, style) = match level {
+                FeedbackLevel::Ok => ("✓ ", theme::ok()),
+                FeedbackLevel::Err => ("✗ ", theme::error()),
+                FeedbackLevel::Warn => ("! ", theme::warn()),
+            };
+            Line::from(vec![
+                Span::styled(glyph, style.add_modifier(Modifier::BOLD)),
+                Span::styled(truncate(&text, width.saturating_sub(2)), style),
+            ])
+        }
+        None if text.starts_with('●') => Line::from(Span::styled(text, theme::warn())),
+        None => Line::from(Span::styled(text, theme::muted())),
+    };
     f.render_widget(Paragraph::new(line), area);
 }
 
-/// Shortest room a path gets before the header drops it.
-const HEADER_MIN_PATH: usize = 14;
-
-fn header_line(
-    width: usize,
-    path: &str,
-    daemon: &[String],
-    daemon_style: ratatui::style::Style,
-) -> Line<'static> {
-    let title = "voxtype configure";
-    let title_width = 2 + str_width(title) + 1; // "─ title "
-    let right_width = |r: &str| str_width(r) + 3; // " right ─"
-
-    // Prefer the whole path with the full daemon text, then the whole path
-    // with the short one, then a shortened path, then no path.
-    let whole_path = str_width(path).max(HEADER_MIN_PATH);
-    let mut choice: Option<(&str, bool)> = None;
-    'outer: for path_min in [Some(whole_path), Some(HEADER_MIN_PATH), None] {
-        for right in daemon {
-            let with_path = path_min.is_some();
-            let path_need = path_min.map_or(0, |p| 2 + p + 1);
-            if title_width + path_need + right_width(right) <= width {
-                choice = Some((right.as_str(), with_path));
-                break 'outer;
-            }
-        }
-    }
-
-    let mut spans = vec![
-        Span::styled("─ ", theme::border()),
-        Span::styled(title, theme::heading()),
-        Span::raw(" "),
-    ];
-    let mut used = title_width;
-    let (right, with_path) = choice.unwrap_or(("", false));
-    let right_used = if right.is_empty() {
-        0
-    } else {
-        right_width(right)
-    };
-    if with_path {
-        let room = width.saturating_sub(used + 2 + 1 + right_used + 1);
-        let shown = common::truncate_middle(path, room);
-        used += 2 + str_width(&shown) + 1;
-        spans.push(Span::styled("─ ", theme::border()));
-        spans.push(Span::styled(shown, theme::muted()));
-        spans.push(Span::raw(" "));
-    }
-    let fill = width.saturating_sub(used + right_used);
-    spans.push(Span::styled("─".repeat(fill), theme::border()));
-    if !right.is_empty() {
-        spans.push(Span::raw(" "));
-        spans.push(Span::styled(right.to_string(), daemon_style));
-        spans.push(Span::styled(" ─", theme::border()));
-    }
-    Line::from(spans)
-}
-
-/// The daemon's state for the header, in a full and a short form. The
-/// version shown is the daemon's, not this TUI's: someone editing settings
-/// wants to know what will act on them, and after an upgrade that was never
-/// restarted those differ.
-fn daemon_status() -> (String, String, ratatui::style::Style) {
-    use crate::daemon_status::DaemonVersion;
-    let daemon = crate::daemon_status::running_version();
-    match &daemon {
-        DaemonVersion::Running(v) if daemon.differs_from_caller() => (
-            format!("! daemon {} · this TUI {}", v, crate::cli::VERSION),
-            format!("! daemon {}", v),
-            theme::warn(),
-        ),
-        DaemonVersion::Running(v) => (
-            format!("● daemon {} running", v),
-            "● daemon running".to_string(),
-            theme::ok(),
-        ),
-        DaemonVersion::NotRunning => (
-            "○ daemon stopped".to_string(),
-            "○ stopped".to_string(),
-            theme::muted(),
-        ),
-        DaemonVersion::Unknown => (
-            "● daemon running".to_string(),
-            "● running".to_string(),
-            theme::ok(),
-        ),
-    }
-}
-
-/// Two-line warning shown on every section while the running binary cannot
-/// serve the configured engine (#450), so it never hides behind navigation.
-pub fn render_variant_mismatch_banner(f: &mut Frame, area: Rect, app: &App) {
-    use crate::setup::variant_check::Remediation;
-    let Some(m) = app.variant_mismatch.as_ref() else {
-        return;
-    };
-    let width = area.width as usize;
-    let active = m
-        .active_variant_name
-        .as_deref()
-        .unwrap_or("the running binary");
-
-    let line1 = format!(
-        "engine = {}, but {} lacks --features {}",
-        m.configured_engine, active, m.required_feature
-    );
-    let line2 = match &m.remediation {
-        // The General page marks the recommended binary with ★.
-        Remediation::SwitchToVariant { .. } => {
-            "F2 to switch binary, or run: sudo voxtype setup onnx --enable".to_string()
-        }
-        Remediation::Rebuild { feature } => {
-            format!("Rebuild voxtype with --features {}", feature)
-        }
-    };
-    let lines = vec![
-        Line::from(vec![
-            Span::styled(" ! ", theme::warn().add_modifier(Modifier::BOLD)),
-            Span::styled(truncate(&line1, width.saturating_sub(3)), theme::warn()),
-        ]),
-        Line::from(vec![
-            Span::raw("   "),
-            Span::styled(truncate(&line2, width.saturating_sub(3)), theme::muted()),
-        ]),
-    ];
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-/// Key hints for whatever has focus right now, most important first. The
-/// footer drops hints from the end when the terminal is narrow.
+/// Key hints for whatever has focus right now, most important first.
 pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
     if app.quit_pending {
         return vec![
-            ("s", "save and quit"),
+            ("Enter", "save and quit"),
             ("d", "discard and quit"),
             ("Esc", "keep editing"),
         ];
     }
-    if app.restart_prompt {
-        return vec![("Enter", "restart voxtype"), ("Esc", "not now")];
-    }
     if app.help_open {
-        return vec![("↑↓", "scroll"), ("any key", "close")];
+        return vec![("↑↓", "scroll"), ("Esc", "close")];
     }
     if app.is_editing() {
-        return vec![
-            ("Enter", "apply"),
-            ("Esc", "cancel"),
-            ("←→", "move"),
-            ("Ctrl-U", "clear"),
-            ("Ctrl-W", "delete word"),
-        ];
+        return vec![("Enter", "done"), ("Esc", "cancel"), ("Ctrl-U", "clear")];
     }
-    // While saved settings wait for a restart, the key that applies them
-    // ranks right after the keys of the current task.
-    let apply = ("R", "apply");
-    let pending = app.apply_pending.get();
     let mut hints = if app.sidebar_focused {
-        vec![("↑↓", "section"), ("Enter", "open")]
-    } else if app.current_section == Section::General {
-        let mut general = vec![("↑↓←→", "variant"), ("Enter", "switch")];
-        if app.missing_model.is_some() {
-            general.push(("M", "download model"));
-        }
-        general.push(("r", "refresh"));
-        general
+        vec![("↑↓", "move"), ("Enter", "open")]
+    } else if app.current_section == Section::Build {
+        vec![("↑↓", "move"), ("Enter", "switch")]
+    } else if app.current_section == Section::Basics && super::basics::on_problem_row(app) {
+        vec![("↑↓", "move"), ("Enter", "fix")]
     } else {
-        vec![
-            ("↑↓", "setting"),
-            ("←→", "change"),
-            ("Enter", "edit"),
-            ("s", "save"),
-            ("r", "revert"),
-        ]
+        vec![("↑↓", "move"), ("←→", "change"), ("Enter", "edit")]
     };
-    if pending {
-        hints.push(apply);
-    } else if app.current_section == Section::General && !app.sidebar_focused {
-        hints.push(("R", "restart voxtype"));
+    if app.unsaved_count() > 0 {
+        hints.push(("s", "save"));
     }
-    hints.push(if app.sidebar_focused {
-        ("Tab", "settings")
-    } else {
-        ("Tab", "sections")
-    });
-    if !app.sidebar_focused && app.current_section != Section::General {
-        hints.push(("PgDn", "about"));
+    if !app.sidebar_focused {
+        hints.push(("Esc", "back"));
     }
     hints.push(("?", "keys"));
-    hints.push(("q", "quit"));
+    if app.sidebar_focused {
+        hints.push(("q", "quit"));
+    }
+    hints.truncate(FOOTER_MAX);
     hints
 }
 
-/// The bottom line: key hints on the left, unsaved sections on the right.
+/// The bottom line of key hints, dropped from the end when narrow.
 pub fn render_footer(f: &mut Frame, area: Rect, app: &App) {
     let width = area.width as usize;
-    let dirty = app.dirty_sections();
-    let right = match dirty.len() {
-        0 => String::new(),
-        1 => format!("● {} unsaved ", dirty[0].label()),
-        n => format!("● {} sections unsaved ", n),
-    };
-    let right_width = str_width(&right);
-
     let mut spans = vec![Span::raw(" ")];
     let mut used = 1;
     for (i, (key, desc)) in footer_hints(app).into_iter().enumerate() {
         let gap = if i == 0 { "" } else { FOOTER_GAP };
         let w = str_width(gap) + str_width(key) + 1 + str_width(desc);
-        if used + w + right_width + 1 > width {
+        if used + w > width {
             break;
         }
         spans.push(Span::raw(gap));
@@ -292,10 +185,6 @@ pub fn render_footer(f: &mut Frame, area: Rect, app: &App) {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(desc, theme::muted()));
         used += w;
-    }
-    if !right.is_empty() && used + right_width <= width {
-        spans.push(Span::raw(" ".repeat(width - used - right_width)));
-        spans.push(Span::styled(right, theme::warn()));
     }
     f.render_widget(Paragraph::new(Line::from(spans)), area);
 }
@@ -311,94 +200,35 @@ fn centered(area: Rect, width: u16, height: u16) -> Rect {
     }
 }
 
-/// Asked on quit only when some section holds unsaved edits, naming them,
-/// so browsing never ends in a question.
+/// Asked on quit only when something is unsaved. The only dialog.
 pub fn render_quit_prompt(f: &mut Frame, app: &App) {
-    let dirty = app.dirty_sections();
-    let names: Vec<&str> = dirty.iter().map(|s| s.label()).collect();
     let area = f.area();
-    let width = 58.min(area.width.saturating_sub(4));
-    let inner_width = width.saturating_sub(4) as usize;
-
-    let mut lines = vec![
-        Line::from(""),
-        Line::from(Span::styled(
-            truncate(&format!("Unsaved: {}", names.join(", ")), inner_width),
-            theme::warn(),
-        )),
-        Line::from(""),
-        prompt_option("s", "Save and quit", inner_width),
-        prompt_option("d", "Discard changes and quit", inner_width),
-        prompt_option("Esc", "Keep editing", inner_width),
-    ];
-    lines.push(Line::from(""));
-    let rect = centered(area, width, lines.len() as u16 + 2);
-    f.render_widget(Clear, rect);
-    let block = common::pane("Save before quitting?", true);
-    let inner = block.inner(rect);
-    f.render_widget(block, rect);
-    let inner = Rect {
-        x: inner.x + 1,
-        width: inner.width.saturating_sub(2),
-        ..inner
-    };
-    f.render_widget(Paragraph::new(lines), inner);
-}
-
-/// Confirmation for R. Says what a restart does, so nobody has to guess
-/// what "restart" means or which part of voxtype it touches.
-pub fn render_restart_prompt(f: &mut Frame, app: &App) {
-    let area = f.area();
-    let width = 64.min(area.width.saturating_sub(4));
+    let width = 52.min(area.width.saturating_sub(4));
     let inner_width = width.saturating_sub(6) as usize;
-    let running = crate::daemon_status::is_daemon_running();
-    let (title, command) = if running {
-        ("Restart voxtype now?", "systemctl --user restart voxtype")
+    let unsaved = app.unsaved_count();
+    let names: Vec<&str> = app.dirty_sections().iter().map(|s| s.label()).collect();
+    let what = if unsaved == 1 {
+        format!("1 change on {}", names.join(", "))
     } else {
-        ("Start voxtype now?", "systemctl --user start voxtype")
+        format!("{} changes on {}", unsaved, names.join(", "))
     };
-    let wrap = |text: &str, style| {
-        common::wrap_words(text, inner_width)
-            .into_iter()
-            .map(move |l| Line::from(Span::styled(l, style)))
+    let save = if super::app::edits_daemon_config() {
+        "Save, restart voxtype, quit"
+    } else {
+        "Save and quit"
     };
-
     let mut lines = vec![Line::from("")];
-    lines.extend(wrap(
-        "The voxtype service and the OSD it runs read their settings when \
-         they start. This restarts both with the saved config.",
-        theme::text(),
-    ));
-    if running {
-        lines.extend(wrap(
-            "A recording or transcription in progress is lost.",
-            theme::muted(),
-        ));
-    }
-    let dirty = app.dirty_sections();
-    if !dirty.is_empty() {
-        let names: Vec<&str> = dirty.iter().map(|s| s.label()).collect();
-        lines.extend(wrap(
-            &format!(
-                "Not included: unsaved changes in {}. Save them first with s.",
-                names.join(", ")
-            ),
-            theme::warn(),
-        ));
+    for l in common::wrap_words(&what, inner_width) {
+        lines.push(Line::from(Span::styled(l, theme::warn())));
     }
     lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled("Runs  ", theme::muted()),
-        Span::raw(truncate(command, inner_width.saturating_sub(6))),
-    ]));
+    lines.push(prompt_option("Enter", save, inner_width));
+    lines.push(prompt_option("d", "Discard them and quit", inner_width));
+    lines.push(prompt_option("Esc", "Keep editing", inner_width));
     lines.push(Line::from(""));
-    lines.push(prompt_option("Enter", "Restart", inner_width));
-    lines.push(prompt_option("Esc", "Not now", inner_width));
-    lines.push(Line::from(""));
-
     let rect = centered(area, width, lines.len() as u16 + 2);
     f.render_widget(Clear, rect);
-    let block = common::pane(title, true);
+    let block = common::pane("Unsaved changes", true);
     let inner = block.inner(rect);
     f.render_widget(block, rect);
     let inner = Rect {
@@ -421,69 +251,56 @@ fn help_lines() -> Vec<Line<'static>> {
     let entry = |keys: &str, desc: &str| {
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{:<14}", keys), theme::key()),
+            Span::styled(format!("{:<13}", keys), theme::key()),
             Span::raw(desc.to_string()),
         ])
     };
     let mut lines = vec![
-        group("Anywhere"),
-        entry("Tab", "Move between the section list and the open section"),
-        entry("Esc", "Back to the section list; from there, quit"),
-        entry("q, Ctrl-C", "Quit (asks first if anything is unsaved)"),
-        entry(
-            "",
-            "and restarts voxtype if saved settings aren't in use yet",
-        ),
-        entry("?", "Show these keys"),
-        entry("R", "Restart voxtype and its OSD to use saved settings"),
-        entry("F2", "Jump to General to pick a binary variant"),
-        entry("PgUp PgDn", "Scroll the About pane"),
-        Line::from(""),
-        group("Section list"),
-        entry("↑↓ j k", "Choose a section; it opens as you move"),
-        entry("Enter → l", "Move into the section"),
+        group("Pages"),
+        entry("↑↓ j k", "Move"),
+        entry("Enter → l", "Open the page"),
+        entry("Tab", "Switch between the list and the page"),
+        entry("q Esc", "Quit (asks first if anything is unsaved)"),
         Line::from(""),
         group("Settings"),
-        entry("↑↓ j k", "Choose a setting"),
-        entry("←→ h l", "Change it to the previous or next value"),
-        entry("Space", "Toggle or advance"),
-        entry("Enter, i", "Type a value"),
-        entry("s", "Save this section to the config file"),
-        entry("r", "Revert this section to what is saved"),
+        entry("↑↓ j k", "Move"),
+        entry("←→ h l Space", "Change"),
+        entry("Enter i", "Type a value, or change one that can't be typed"),
+        entry("PgUp PgDn", "Scroll the explanation"),
+        entry("Esc", "Back to the list"),
+        Line::from(""),
+        group("Saving"),
+        entry("s", "Save every change and restart voxtype to use them"),
+        entry("r", "Put this page back to what is saved"),
         Line::from(""),
         group("Typing a value"),
-        entry("Enter", "Apply"),
-        entry("Esc, Ctrl-C", "Cancel"),
-        entry("←→ Home End", "Move the cursor"),
-        entry("Backspace Del", "Delete a character"),
+        entry("Enter", "Done"),
+        entry("Esc Ctrl-C", "Cancel"),
         entry("Ctrl-W", "Delete the previous word"),
         entry("Ctrl-U", "Clear"),
         Line::from(""),
-        group("General"),
-        entry("↑↓←→ hjkl", "Choose a binary variant"),
-        entry("Enter", "Switch to it (asks for your password)"),
-        entry("D", "Start or restart voxtype right away, without asking"),
-        entry("M", "Download the configured model when it is missing"),
-        entry("r", "Refresh"),
+        group("Text page"),
+        entry("Enter", "Edit a replacement, or add one"),
+        entry("d Delete", "Remove the replacement under the cursor"),
         Line::from(""),
-        group("Markers"),
+        group("Marks"),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{:<14}", "●"), theme::warn()),
-            Span::raw("Changed here, not saved yet"),
+            Span::styled(format!("{:<13}", "●"), theme::warn()),
+            Span::raw("Changed, not saved yet"),
         ]),
         Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{:<14}", "›"), theme::accent()),
-            Span::raw("The open section"),
+            Span::styled(format!("{:<13}", "!"), theme::warn()),
+            Span::raw("Something to fix; Enter fixes it"),
         ]),
         Line::from(""),
-        group("Sections"),
+        group("What each page holds"),
     ];
     for section in Section::ALL {
         lines.push(Line::from(vec![
             Span::raw("  "),
-            Span::styled(format!("{:<14}", section.label()), theme::text()),
+            Span::styled(format!("{:<19}", section.label()), theme::text()),
             Span::styled(section.summary().to_string(), theme::muted()),
         ]));
     }
@@ -493,7 +310,7 @@ fn help_lines() -> Vec<Line<'static>> {
 pub fn render_help_overlay(f: &mut Frame, app: &App) {
     let area = f.area();
     let lines = help_lines();
-    let width = 80.min(area.width.saturating_sub(4));
+    let width = 76.min(area.width.saturating_sub(4));
     let height = (lines.len() as u16 + 2).min(area.height.saturating_sub(2));
     let rect = centered(area, width, height);
     f.render_widget(Clear, rect);
@@ -524,43 +341,11 @@ pub fn render_help_overlay(f: &mut Frame, app: &App) {
 mod tests {
     use super::*;
 
-    fn text(line: &Line) -> String {
-        line.spans.iter().map(|s| s.content.as_ref()).collect()
-    }
-
-    fn daemon() -> Vec<String> {
-        vec![
-            "! daemon 1.1.0 · this TUI 1.1.1".to_string(),
-            "! daemon 1.1.0".to_string(),
-        ]
-    }
-
     #[test]
-    fn header_fills_the_width_exactly() {
-        for width in [60, 80, 100, 140, 200] {
-            let line = header_line(
-                width,
-                "~/.config/voxtype/config.toml",
-                &daemon(),
-                theme::warn(),
-            );
-            assert_eq!(
-                str_width(&text(&line)),
-                width,
-                "width {width}: {:?}",
-                text(&line)
-            );
+    fn help_fits_the_overlay_width_at_80_columns() {
+        for line in help_lines() {
+            let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
+            assert!(str_width(&text) <= 72, "{text:?}");
         }
-    }
-
-    #[test]
-    fn header_shortens_the_daemon_before_dropping_the_path() {
-        let path = "~/.config/voxtype/config.toml";
-        let wide = text(&header_line(120, path, &daemon(), theme::warn()));
-        assert!(wide.contains(path) && wide.contains("this TUI"), "{wide}");
-        let medium = text(&header_line(66, path, &daemon(), theme::warn()));
-        assert!(medium.contains("! daemon 1.1.0 ─"), "{medium}");
-        assert!(!medium.contains("this TUI"), "{medium}");
-        assert!(medium.contains("~/"), "{medium}");
     }
 }

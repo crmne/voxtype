@@ -146,71 +146,79 @@ The launcher script picks the first available terminal emulator (`$TERMINAL`,
 then ghostty / alacritty / kitty / foot / wezterm / konsole / xterm / xfce4-terminal) and
 sets the window class to `voxtype` so compositors can float it.
 
-The header shows which config file is being edited (the `-c/--config` path
-when you pass one) and whether the daemon is running. Each section shows its
-settings with an explanation of the selected one beside it, or below it on
-terminals narrower than about 120 columns. The TUI fits an 80x24 terminal
-and takes its colors from your terminal theme.
+The first page, **Basics**, holds what most people change: the engine and
+model, the hotkey and how it works, how text is delivered, and the
+on-screen display. Everything else has its own page in the list on the
+left. Problems that stop dictation from working, such as an engine the
+installed build can't run or a model that isn't downloaded, appear on
+Basics as rows marked `!`; Enter on one fixes it.
 
-Edits stay in memory until you save. A setting you changed but have not
-saved is marked with `●`, as is its section in the list, and the line under
-the section says whether everything is saved. Quitting asks first only when
-something is unsaved.
+Settings with a few values show them all on the row, with the current one
+marked; `←→` changes it. Under the settings, a sentence or two explains the
+one under the cursor. The TUI fits an 80x24 terminal and takes its colors
+from your terminal theme.
 
-#### Sections
+A setting you changed but have not saved is marked `●`, and the status line
+counts them. **`s` saves every change and restarts voxtype**, so the daemon
+and its on-screen display use the new settings right away; there is nothing
+else to apply. If voxtype isn't running it is left stopped and uses the
+settings when it starts. When `-c/--config` points at a file other than the
+one the service reads, `s` only saves. Quitting with unsaved changes asks
+once: save, discard, or keep editing.
 
-| Group | Section | What it covers |
-|---|---|---|
-| Setup | General | Active engine, variant binary, daemon status, hardware-aware variant recommendation |
-| Setup | Engine | Per-engine tuning for Whisper / Parakeet / Moonshine / SenseVoice / Paraformer / Dolphin / Omnilingual / Cohere |
-| Recording | Hotkey | PTT key, mode (PTT vs toggle), cancel key, modifier key, evdev-listener toggle |
-| Recording | Audio | Input device, max recording length, MPRIS pause/ducking, audio feedback theme/volume |
-| Recording | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
-| Transcript | Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
-| Transcript | Text | Spoken-punctuation toggle, smart-auto-submit, custom replacements list editor |
-| Status | Notifications | Desktop notifications for recording start/stop and transcription |
-| Status | OSD | On-screen waveform: frontend, style, position, size, opacity |
-| Status | Waybar | Status integration: icon theme + per-state icon overrides |
-| More | Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
-| More | Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
+#### Pages
+
+| Page | What it covers |
+|---|---|
+| Basics | Engine, model, hotkey, hotkey mode, output, on-screen display, and anything that needs fixing |
+| Engine | The engine's model, language, threads and loading, per engine |
+| Hotkey | Built-in listener, hotkey, mode, cancel key, second model key |
+| Audio | Microphone, longest recording, pausing or lowering media, sounds |
+| Voice detection | Skipping recordings with no speech: method and sensitivity |
+| Output | Type, clipboard, paste or file; the file; Enter after; delays; post-processing |
+| Text | Spoken punctuation, "submit" to send, word replacements |
+| Notifications | Desktop notifications for recording start/stop and the text |
+| On-screen display | The recording overlay: frontend, style, position, size, opacity |
+| Waybar | Icon theme and per-state icons |
+| Meeting | Meeting mode, telling speakers apart, what to listen to |
+| Advanced | Transcribing while recording, which GPU, streaming output |
+| Build | Which installed voxtype build runs, and which suits this machine |
 
 #### Keyboard
 
-The footer always lists the keys for whatever has focus; `?` lists them all.
+The footer lists the keys for whatever has focus; `?` lists them all.
 
 ```
-Anywhere       Tab switch list/section   Esc back, then quit   q quit
-               ?  all keys               F2 General            PgUp/PgDn scroll About
-Section list   ↑↓ / jk choose            Enter / → / l open
-Settings       ↑↓ / jk choose setting    ←→ / hl change value
-               Space toggle              Enter / i type a value
-               s save section            r revert section
+Page list      ↑↓ / jk move              Enter / → / l open    q / Esc quit
+Settings       ↑↓ / jk move              ←→ / hl / Space change
+               Enter / i type a value    Esc back to the list
+               PgUp / PgDn scroll the explanation
+Anywhere       s save and apply          r put this page back  ?  all keys
+               Tab switch list and page
 Typing         type insert               ←→ / Home / End move
                Backspace / Delete        Ctrl-W delete word
-               Ctrl-U clear              Enter apply / Esc cancel
+               Ctrl-U clear              Enter done / Esc cancel
 ```
-
-Press `?` from anywhere in the TUI for the same reference as a popup.
 
 #### Hardware-aware recommendations
 
-The General section detects your CPU (AVX2 / AVX-512) and GPU (NVIDIA /
-AMD), then marks the recommended variant for each engine family with `★`.
-The About pane explains the choice (`"AMD GPU detected. The MIGraphX
-execution provider is new… ONNX (AVX-512) on CPU is the safe default."`).
+The Build page lists the installed builds (Whisper or Parakeet and the
+other ONNX engines, each for the CPU or a graphics card), marks the one in
+use with `●` and the ones that suit this machine's CPU and GPU with `★`,
+and says why. Enter switches to the build under the cursor.
 
-When you switch the engine on the Engine page, the TUI also picks the
-matching binary variant if one is needed (e.g. moving from Whisper to
-Parakeet swaps the symlink at `/usr/bin/voxtype` from a Whisper variant to
-an ONNX variant). The actual symlink change runs through `pkexec` so you
-get the standard polkit prompt.
+When you change the engine, the TUI also picks the matching build if one
+is needed (moving from Whisper to Parakeet swaps `/usr/bin/voxtype` from a
+Whisper build to an ONNX one). The switch runs through `pkexec`, so you get
+the standard polkit password prompt, and a model you haven't downloaded yet
+downloads in the terminal before voxtype restarts.
 
 #### Compositor binding awareness
 
-If you have the evdev listener disabled and rely on compositor bindings,
-the Hotkey screen scans `~/.config/hypr/*.conf`, `~/.config/sway/config*`,
+If you have the built-in listener off and rely on compositor bindings,
+the Hotkey page scans `~/.config/hypr/*.conf`, `~/.config/sway/config*`,
 and `~/.config/niri/config.kdl` for any `voxtype record` / `voxtype meeting`
-bindings, lists them in the About pane, and suggests config-format-specific
+bindings, lists them under the settings, and suggests config-format-specific
 snippets for any standard role you haven't bound (cancel, toggle, meeting
 start/stop). Suggestions skip key combos already in use by other actions.
 

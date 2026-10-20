@@ -1,9 +1,9 @@
-//! Shared rendering helpers for form-style sections (Hotkey, Audio, Output, …).
+//! Shared pieces for pages: text input, the form renderer, text helpers.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
-    layout::{Constraint, Direction, Layout, Rect},
-    style::{Modifier, Style},
+    layout::Rect,
+    style::Modifier,
     text::{Line, Span},
     widgets::{Block, BorderType, Borders, Padding, Paragraph, Wrap},
     Frame,
@@ -277,19 +277,29 @@ pub fn on_off(b: bool) -> String {
 /// What an optional setting with no value reads as everywhere in the TUI.
 pub const NOT_SET: &str = "Not set";
 
-/// Content width at which a form and its About pane sit side by side. Below
-/// it they stack, so neither column is squeezed into wrapping every label.
-pub const SIDE_BY_SIDE_MIN_WIDTH: u16 = 100;
+/// Lines the explanation under the settings keeps when the settings would
+/// otherwise fill the pane.
+const DESCRIPTION_MIN_HEIGHT: u16 = 3;
 
-/// Rows the About pane keeps when stacked under a long form.
-const STACKED_GUIDANCE_MIN_HEIGHT: u16 = 6;
+/// Widest the explanation runs, so it stays readable on wide terminals.
+const DESCRIPTION_MAX_WIDTH: u16 = 76;
 
-/// Specification for a row in a two-pane form.
+/// Gap between choices shown side by side. Each choice already carries a
+/// space on either side, so the marked one reads as a chip.
+const CHOICE_GAP: &str = "";
+
+/// One setting on a page.
+#[derive(Debug, Clone)]
 pub struct FormRowSpec {
     pub focused: bool,
     pub dimmed: bool,
     pub label: String,
     pub value: String,
+    /// Every value the setting can take, when there are few enough to show
+    /// side by side. `value` is the current one.
+    pub choices: Option<Vec<String>>,
+    /// A problem to fix rather than a setting: drawn in the warning color.
+    pub attention: bool,
 }
 
 impl FormRowSpec {
@@ -299,12 +309,42 @@ impl FormRowSpec {
             dimmed: false,
             label: label.into(),
             value: value.into(),
+            choices: None,
+            attention: false,
         }
     }
 
     pub fn dimmed(mut self, dimmed: bool) -> Self {
         self.dimmed = dimmed;
         self
+    }
+
+    /// Mark the row as a problem to fix.
+    pub fn attention(mut self) -> Self {
+        self.attention = true;
+        self
+    }
+
+    /// Show all of `choices` on the row, with the current value marked.
+    pub fn choices<S: AsRef<str>>(mut self, choices: &[S]) -> Self {
+        self.choices = Some(choices.iter().map(|c| c.as_ref().to_string()).collect());
+        self
+    }
+
+    /// The choices to show inline: the explicit ones, or On and Off for a
+    /// switch. `None` for free values and while typing.
+    fn inline_choices(&self) -> Option<Vec<String>> {
+        if self.value.contains(CARET) {
+            return None;
+        }
+        match &self.choices {
+            Some(c) if c.contains(&self.value) => Some(c.clone()),
+            Some(_) => None,
+            None if self.value == "On" || self.value == "Off" => {
+                Some(vec!["On".to_string(), "Off".to_string()])
+            }
+            None => None,
+        }
     }
 }
 
@@ -366,6 +406,32 @@ pub fn truncate_middle(s: &str, max: usize) -> String {
     format!("{}…{}", start, end)
 }
 
+/// Greedy word wrap to `width` cells.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if str_width(line) + 1 + str_width(word) <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
+}
+
+/// The first message that fits in `width` cells, or the last one cut to fit.
+/// Lets a line drop whole clauses on narrow terminals instead of ending
+/// mid-word.
+pub fn first_that_fits(candidates: &[String], width: usize) -> String {
+    candidates
+        .iter()
+        .find(|c| str_width(c) <= width)
+        .cloned()
+        .unwrap_or_else(|| truncate(candidates.last().map_or("", |c| c.as_str()), width))
+}
+
 /// A rounded pane. The focused pane takes the accent border so it is clear
 /// where the arrow keys go.
 pub fn pane<'a>(title: impl Into<String>, focused: bool) -> Block<'a> {
@@ -385,214 +451,18 @@ pub fn pane<'a>(title: impl Into<String>, focused: bool) -> Block<'a> {
         ))
 }
 
-/// One `label  value` line for read-only facts, with the label muted and
-/// padded to `label_width`.
-pub fn fact_line<'a>(label: &str, label_width: usize, value: Vec<Span<'a>>) -> Line<'a> {
-    let mut spans = vec![Span::styled(
-        format!("{:<width$}  ", label, width = label_width),
-        theme::muted(),
-    )];
-    spans.extend(value);
-    Line::from(spans)
-}
-
-/// The status line under a section: the last save/revert outcome when there
-/// is one, otherwise whether this section holds unsaved edits, otherwise
-/// whether saved settings still wait for voxtype to restart.
-///
-/// `apply_pending` means the file holds settings the running daemon (and
-/// the OSD it supervises) has not read yet. Every message then ends with the
-/// one thing that applies them: R, or quitting.
-pub fn render_status_line(
-    f: &mut Frame,
-    area: Rect,
-    dirty: bool,
-    apply_pending: bool,
-    feedback: Option<(FeedbackLevel, &str)>,
-) {
-    // Indented to line up with the text inside the panes above.
-    let area = Rect {
-        x: area.x + 2,
-        width: area.width.saturating_sub(2),
-        ..area
-    };
-    let lines = status_lines(area.width as usize, dirty, apply_pending, feedback);
-    f.render_widget(Paragraph::new(lines), area);
-}
-
-/// Most lines a status message may take. A message that tells the user to
-/// press a key must not be cut off before the key.
-const STATUS_MAX_LINES: usize = 3;
-
-/// Rows the status line needs in an area `width` cells wide.
-pub fn status_height(
-    width: u16,
-    dirty: bool,
-    apply_pending: bool,
-    feedback: Option<(FeedbackLevel, &str)>,
-) -> u16 {
-    status_lines(
-        width.saturating_sub(2) as usize,
-        dirty,
-        apply_pending,
-        feedback,
-    )
-    .len() as u16
-}
-
-/// Greedy word wrap to `width` cells.
-pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for word in text.split_whitespace() {
-        match lines.last_mut() {
-            Some(line) if str_width(line) + 1 + str_width(word) <= width => {
-                line.push(' ');
-                line.push_str(word);
-            }
-            _ => lines.push(word.to_string()),
-        }
-    }
-    lines
-}
-
-fn status_lines(
-    width: usize,
-    dirty: bool,
-    apply_pending: bool,
-    feedback: Option<(FeedbackLevel, &str)>,
-) -> Vec<Line<'static>> {
-    let line = match feedback {
-        Some((level, message)) if !(level == FeedbackLevel::Ok && apply_pending) => {
-            let message = match super::config_editor::tui_config_path() {
-                Some(full) => message.replace(&full.display().to_string(), &display_config_path()),
-                None => message.to_string(),
-            };
-            let (glyph, style) = match level {
-                FeedbackLevel::Ok => ("✓ ", theme::ok()),
-                FeedbackLevel::Err => ("✗ ", theme::error()),
-                FeedbackLevel::Warn => ("! ", theme::warn()),
-            };
-            let mut wrapped = wrap_words(&message, width.saturating_sub(2).max(1));
-            if wrapped.len() > STATUS_MAX_LINES {
-                wrapped.truncate(STATUS_MAX_LINES);
-                let last = wrapped.last_mut().expect("non-empty");
-                *last = truncate(&format!("{} …", last), width.saturating_sub(2));
-            }
-            return wrapped
-                .into_iter()
-                .enumerate()
-                .map(|(i, text)| {
-                    let lead = if i == 0 { glyph } else { "  " };
-                    Line::from(vec![
-                        Span::styled(lead, style.add_modifier(Modifier::BOLD)),
-                        Span::styled(text, style),
-                    ])
-                })
-                .collect();
-        }
-        feedback => feedback,
-    };
-    vec![status_line(width, dirty, apply_pending, line)]
-}
-
-fn status_line(
-    width: usize,
-    dirty: bool,
-    apply_pending: bool,
-    feedback: Option<(FeedbackLevel, &str)>,
-) -> Line<'static> {
-    match feedback {
-        Some((level, message)) => {
-            // Sections report the full path they saved to; show it the way
-            // the header does.
-            let message = match super::config_editor::tui_config_path() {
-                Some(full) => message.replace(&full.display().to_string(), &display_config_path()),
-                None => message.to_string(),
-            };
-            let room = width.saturating_sub(2);
-            let message = if level == FeedbackLevel::Ok && apply_pending {
-                let base = message.trim_end_matches('.');
-                first_that_fits(
-                    &[
-                        format!("{}. In use once voxtype restarts: press R, or quit", base),
-                        format!("{}. R restarts voxtype to use it", base),
-                        "Saved. R restarts voxtype to use it".to_string(),
-                    ],
-                    room,
-                )
-            } else {
-                truncate(&message, room)
-            };
-            let (glyph, style) = match level {
-                FeedbackLevel::Ok => ("✓ ", theme::ok()),
-                FeedbackLevel::Err => ("✗ ", theme::error()),
-                FeedbackLevel::Warn => ("! ", theme::warn()),
-            };
-            Line::from(vec![
-                Span::styled(glyph, style.add_modifier(Modifier::BOLD)),
-                Span::styled(message, style),
-            ])
-        }
-        None if !dirty && apply_pending => {
-            let text = first_that_fits(
-                &[
-                    "Saved, not in use yet: R restarts voxtype and its OSD (quitting does too)"
-                        .to_string(),
-                    "Saved, not in use yet: R restarts voxtype and its OSD".to_string(),
-                    "Saved, not in use yet: press R".to_string(),
-                ],
-                width.saturating_sub(2),
-            );
-            Line::from(vec![
-                Span::styled("! ", theme::warn().add_modifier(Modifier::BOLD)),
-                Span::styled(text, theme::warn()),
-            ])
-        }
-        None if dirty => {
-            let path = display_config_path();
-            let text = first_that_fits(
-                &[
-                    format!("Not saved yet: s writes {}, r reverts", path),
-                    format!("Not saved yet: s writes {}", path),
-                    "Not saved yet: s saves, r reverts".to_string(),
-                ],
-                width.saturating_sub(2),
-            );
-            Line::from(vec![
-                Span::styled("● ", theme::warn().add_modifier(Modifier::BOLD)),
-                Span::styled(text, theme::warn()),
-            ])
-        }
-        None => {
-            let path = display_config_path();
-            let text = first_that_fits(
-                &[format!("All saved to {}", path), "All saved".to_string()],
-                width,
-            );
-            Line::from(Span::styled(text, theme::muted()))
-        }
-    }
-}
-
-/// The first message that fits in `width` cells, or the last one cut to fit.
-/// Lets a status line drop whole clauses on narrow terminals instead of
-/// ending mid-word.
-pub fn first_that_fits(candidates: &[String], width: usize) -> String {
-    candidates
-        .iter()
-        .find(|c| str_width(c) <= width)
-        .cloned()
-        .unwrap_or_else(|| truncate(candidates.last().map_or("", |c| c.as_str()), width))
-}
-
 /// Width of the label column: as wide as the longest label, but leaving the
 /// value at least a third of the row.
 fn label_column_width(rows: &[FormRowSpec], inner_width: usize) -> usize {
     let longest = rows.iter().map(|r| str_width(&r.label)).max().unwrap_or(0);
     let value_room = (inner_width / 3).max(16);
-    let cap = inner_width.saturating_sub(4 + value_room).max(12);
+    let cap = inner_width.saturating_sub(ROW_CHROME + value_room).max(12);
     longest.min(cap)
 }
+
+/// Cells a row spends outside its label and value: the cursor and its
+/// space, and the space, unsaved marker and space between label and value.
+const ROW_CHROME: usize = 2 + 3;
 
 /// First visible row so the focused row stays on screen, keeping one row of
 /// context below it when there is more to show.
@@ -604,10 +474,75 @@ pub fn scroll_offset(focused: usize, total: usize, visible: usize) -> usize {
     want_bottom.saturating_sub(visible)
 }
 
-/// One form row: an unsaved marker gutter, the label, then the value. The
-/// focused row is reversed video across the whole width; it alone shows the
-/// `◂ ▸` cue that arrows change it. With focus in the section list no row
-/// is highlighted, so there is one selection on screen at a time.
+/// The value cell of a row. Choices that fit are all shown, the current one
+/// marked; otherwise the value alone, between `‹ ›` on the focused row so it
+/// is clear the arrows change it.
+fn value_spans(row: &FormRowSpec, row_focused: bool, room: usize) -> Vec<Span<'static>> {
+    let editing = row.value.contains(CARET);
+    if row.attention {
+        let style = theme::warn().add_modifier(Modifier::BOLD);
+        return vec![Span::styled(
+            truncate(&format!("! {}", row.value), room),
+            if row_focused {
+                style.add_modifier(Modifier::REVERSED)
+            } else {
+                style
+            },
+        )];
+    }
+    if row.dimmed {
+        return vec![Span::styled(
+            truncate(&format!(" {}", row.value), room),
+            theme::muted(),
+        )];
+    }
+    if let Some(choices) = row.inline_choices() {
+        let width: usize = choices.iter().map(|c| str_width(c) + 2).sum::<usize>()
+            + str_width(CHOICE_GAP) * choices.len().saturating_sub(1);
+        if width <= room {
+            let mut spans = Vec::new();
+            for (i, choice) in choices.iter().enumerate() {
+                if i > 0 {
+                    spans.push(Span::raw(CHOICE_GAP));
+                }
+                let style = if *choice != row.value {
+                    theme::muted()
+                } else if row_focused {
+                    theme::selected()
+                } else {
+                    theme::accent().add_modifier(Modifier::BOLD)
+                };
+                spans.push(Span::styled(format!(" {} ", choice), style));
+            }
+            return spans;
+        }
+    }
+    let value_style = if row.value == NOT_SET {
+        theme::muted()
+    } else {
+        theme::text()
+    };
+    // A row that is an action rather than a value has nothing to cycle.
+    if row_focused && !editing && !row.value.is_empty() {
+        let inner = truncate(&row.value, room.saturating_sub(4));
+        return vec![
+            Span::styled("‹ ", theme::accent()),
+            Span::styled(inner, value_style.add_modifier(Modifier::BOLD)),
+            Span::styled(" ›", theme::accent()),
+        ];
+    }
+    vec![Span::styled(
+        truncate(&format!(" {}", row.value), room),
+        if editing {
+            theme::text().add_modifier(Modifier::BOLD)
+        } else {
+            value_style
+        },
+    )]
+}
+
+/// One row: cursor, label, unsaved marker, value. Only the focused row of a
+/// focused page shows the cursor, so there is one selection on screen.
 fn form_line(
     row: &FormRowSpec,
     modified: bool,
@@ -615,75 +550,30 @@ fn form_line(
     label_width: usize,
     width: usize,
 ) -> Line<'static> {
-    let editing = row.value.contains(CARET);
     let row_focused = row.focused && pane_focused;
-    let gutter = if modified { "● " } else { "  " };
     let label = format!("{:<w$}", truncate(&row.label, label_width), w = label_width);
-    let value_room = width.saturating_sub(2 + label_width + 2);
-    let shown_value = if row_focused && !editing && !row.dimmed {
-        format!("◂ {} ▸", row.value)
+    let label_style = if row_focused {
+        theme::accent().add_modifier(Modifier::BOLD)
+    } else if row.dimmed {
+        theme::muted()
     } else {
-        row.value.clone()
+        theme::text()
     };
-    let shown_value = truncate(&shown_value, value_room);
-    let pad = value_room.saturating_sub(str_width(&shown_value));
-
-    if row_focused {
-        let mut style = theme::selected();
-        if row.dimmed {
-            style = style.add_modifier(Modifier::DIM);
-        }
-        let gutter_style = if modified {
-            theme::warn().add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-        };
-        return Line::from(vec![
-            Span::styled(gutter, gutter_style),
-            Span::styled(
-                format!("{}  {}{}", label, shown_value, " ".repeat(pad)),
-                style,
-            ),
-        ]);
-    }
-
-    let (label_style, value_style) = if row.dimmed {
-        (theme::muted(), theme::muted())
-    } else if row.value == NOT_SET {
-        (theme::text(), theme::muted())
-    } else {
-        (theme::text(), theme::text())
-    };
-    Line::from(vec![
-        Span::styled(gutter, theme::warn().add_modifier(Modifier::BOLD)),
+    let mut spans = vec![
+        Span::styled(
+            if row_focused { "› " } else { "  " },
+            theme::accent().add_modifier(Modifier::BOLD),
+        ),
         Span::styled(label, label_style),
-        Span::raw("  "),
-        Span::styled(shown_value, value_style),
-    ])
-}
-
-/// Which rows differ from what was last saved. While a section is clean its
-/// rows become the baseline; once it is dirty, a row whose value no longer
-/// matches the baseline for its label is an unsaved edit.
-fn modified_rows(app: &App, title: &str, dirty: bool, rows: &[FormRowSpec]) -> Vec<bool> {
-    let mut baselines = app.baselines.borrow_mut();
-    let saved = baselines.entry(title.to_string()).or_default();
-    if !dirty {
-        for row in rows {
-            if !row.value.contains(CARET) {
-                saved.insert(row.label.clone(), row.value.clone());
-            }
-        }
-        return vec![false; rows.len()];
-    }
-    rows.iter()
-        .map(|row| {
-            !row.value.contains(CARET)
-                && saved
-                    .get(&row.label)
-                    .is_some_and(|before| *before != row.value)
-        })
-        .collect()
+        Span::raw(" "),
+        Span::styled(
+            if modified { "●" } else { " " },
+            theme::warn().add_modifier(Modifier::BOLD),
+        ),
+    ];
+    let room = width.saturating_sub(ROW_CHROME + label_width);
+    spans.extend(value_spans(row, row_focused, room));
+    Line::from(spans)
 }
 
 /// Lines `lines` will occupy once wrapped to `width` cells.
@@ -695,71 +585,53 @@ fn wrapped_height(lines: &[Line<'_>], width: u16) -> u16 {
         .sum()
 }
 
-/// Render a form section: the settings form and an About pane explaining the
-/// focused setting, side by side on wide terminals and stacked on narrow
-/// ones, with a status line underneath.
+/// The explanation for the focused setting, without the heading that
+/// repeats its label and the blank line after it.
+fn description_body(guidance: Vec<Line<'_>>) -> Vec<Line<'_>> {
+    let is_heading =
+        |l: &Line| l.spans.len() == 1 && l.spans[0].style.add_modifier.contains(Modifier::BOLD);
+    let is_blank = |l: &Line| l.spans.iter().all(|s| s.content.trim().is_empty());
+    let mut lines = guidance.into_iter().peekable();
+    if lines.peek().is_some_and(is_heading) {
+        lines.next();
+        while lines.peek().is_some_and(is_blank) {
+            lines.next();
+        }
+    }
+    lines.collect()
+}
+
+/// Render a page: one pane titled with the page name, the settings, then a
+/// blank line and the explanation of the setting under the cursor.
 ///
-/// The form scrolls to keep the focused row visible. Rows edited since the
-/// last save carry a `●`, and the form's title counts them.
-#[allow(clippy::too_many_arguments)]
+/// The settings scroll to keep the focused row visible, and the
+/// explanation scrolls with PgUp/PgDn. A changed row carries a `●`; the
+/// page's message goes to the status line under the pane.
 pub fn render_form_with_guidance(
     f: &mut Frame,
     area: Rect,
     app: &App,
-    title: &str,
-    dirty: bool,
     feedback: Option<(FeedbackLevel, &str)>,
     rows: &[FormRowSpec],
     guidance: Vec<Line<'_>>,
 ) {
-    // An app-wide notice (the last restart) outranks the section's own message.
-    let feedback = match &app.notice {
-        Some((level, message)) => Some((*level, message.as_str())),
-        None => feedback,
-    };
-    let pending = app.apply_pending.get();
-    let status_rows = status_height(area.width, dirty, pending, feedback);
-    let [body, status] = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(status_rows)])
-        .areas(area);
-    render_status_line(f, status, dirty, pending, feedback);
-
-    let (form_area, about_area) = if body.width >= SIDE_BY_SIDE_MIN_WIDTH {
-        let [form, about] = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .areas(body);
-        (form, about)
-    } else {
-        let wanted = rows.len() as u16 + 2;
-        let room = body
-            .height
-            .saturating_sub(STACKED_GUIDANCE_MIN_HEIGHT)
-            .max(5);
-        let [form, about] = Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([Constraint::Length(wanted.min(room)), Constraint::Min(0)])
-            .areas(body);
-        (form, about)
-    };
-
-    let modified = modified_rows(app, title, dirty, rows);
-    let modified_count = modified.iter().filter(|m| **m).count();
+    app.set_page_message(feedback);
+    let section = app.current_section;
     let focused = app.content_focused();
+    let mut block = pane(section.label(), focused);
+    let inner = block.inner(area);
 
-    let mut block = pane(title, focused);
-    if dirty {
-        let label = match modified_count {
-            0 => " ● unsaved ".to_string(),
-            1 => " ● 1 unsaved change ".to_string(),
-            n => format!(" ● {} unsaved changes ", n),
-        };
-        block = block.title(Line::from(Span::styled(label, theme::warn())).right_aligned());
-    }
-    let inner = block.inner(form_area);
+    let description = description_body(guidance);
+    let desc_width = inner.width.min(DESCRIPTION_MAX_WIDTH);
+    let desc_needed = wrapped_height(&description, desc_width);
+    // The settings get what they need unless that would squeeze the
+    // explanation below a few lines; one blank line sits between the two.
+    let desc_floor = desc_needed.min(DESCRIPTION_MIN_HEIGHT);
+    let rows_height = (rows.len() as u16)
+        .min(inner.height.saturating_sub(desc_floor + 1))
+        .max(inner.height.min(1));
 
-    let visible = inner.height as usize;
+    let visible = rows_height as usize;
     let focused_idx = rows.iter().position(|r| r.focused).unwrap_or(0);
     let offset = scroll_offset(focused_idx, rows.len(), visible);
     let below = rows.len().saturating_sub(offset + visible);
@@ -769,10 +641,10 @@ pub fn render_form_with_guidance(
             (true, false) => format!(" ↑ {} more ", offset),
             _ => format!(" ↓ {} more ", below),
         };
-        block = block.title_bottom(Line::from(Span::styled(hint, theme::muted())).right_aligned());
+        block = block.title_bottom(Line::from(Span::styled(hint, theme::muted())));
     }
-    f.render_widget(block, form_area);
 
+    let modified = app.modified_rows(section, rows);
     let width = inner.width as usize;
     let label_width = label_column_width(rows, width);
     let lines: Vec<Line> = rows
@@ -782,42 +654,48 @@ pub fn render_form_with_guidance(
         .take(visible)
         .map(|(row, m)| form_line(row, *m, focused, label_width, width))
         .collect();
-    f.render_widget(Paragraph::new(lines), inner);
 
-    if about_area.height >= 3 {
-        render_guidance(f, about_area, app, guidance);
+    let desc_area = Rect {
+        x: inner.x + 2,
+        y: inner.y + rows_height + 1,
+        width: desc_width.saturating_sub(2),
+        height: inner.height.saturating_sub(rows_height + 1),
+    };
+    if desc_area.height > 0 && !description.is_empty() {
+        let total = wrapped_height(&description, desc_area.width);
+        let max_scroll = total.saturating_sub(desc_area.height);
+        let scroll = app.guidance_scroll.get().min(max_scroll);
+        app.guidance_scroll.set(scroll);
+        if max_scroll > 0 {
+            let hint = if scroll < max_scroll {
+                " PgDn more "
+            } else {
+                " PgUp back "
+            };
+            block =
+                block.title_bottom(Line::from(Span::styled(hint, theme::muted())).right_aligned());
+        }
+        f.render_widget(block, area);
+        f.render_widget(
+            Paragraph::new(description)
+                .style(theme::muted())
+                .wrap(Wrap { trim: false })
+                .scroll((scroll, 0)),
+            desc_area,
+        );
+    } else {
+        f.render_widget(block, area);
     }
+    let rows_area = Rect {
+        height: rows_height,
+        ..inner
+    };
+    f.render_widget(Paragraph::new(lines), rows_area);
 }
 
-/// The About pane, scrolled by PgUp/PgDn. Long text says how much is left
-/// rather than vanishing past the border.
-pub fn render_guidance(f: &mut Frame, area: Rect, app: &App, guidance: Vec<Line<'_>>) {
-    let mut block = pane("About", false);
-    let inner = block.inner(area);
-    let total = wrapped_height(&guidance, inner.width);
-    let max_scroll = total.saturating_sub(inner.height);
-    let scroll = app.guidance_scroll.get().min(max_scroll);
-    app.guidance_scroll.set(scroll);
-    if max_scroll > 0 {
-        let hint = if scroll < max_scroll {
-            " PgDn more "
-        } else {
-            " PgUp back "
-        };
-        block = block.title_bottom(Line::from(Span::styled(hint, theme::muted())).right_aligned());
-    }
-    f.render_widget(block, area);
-    f.render_widget(
-        Paragraph::new(guidance)
-            .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
-        inner,
-    );
-}
-
-/// Shown in place of a section whose state could not be loaded.
-pub fn render_load_error(f: &mut Frame, area: Rect, title: &str) {
-    let block = pane(title, false);
+/// Shown in place of a page whose settings could not be read.
+pub fn render_load_error(f: &mut Frame, area: Rect, app: &App) {
+    let block = pane(app.current_section.label(), app.content_focused());
     let inner = block.inner(area);
     f.render_widget(block, area);
     f.render_widget(
@@ -827,7 +705,9 @@ pub fn render_load_error(f: &mut Frame, area: Rect, title: &str) {
                 theme::error(),
             )),
             Line::from(""),
-            Line::from("Fix the file by hand or run `voxtype config` to see the parse error."),
+            Line::from(
+                "Run `voxtype config` to see what is wrong with it, fix it, then reopen this.",
+            ),
         ])
         .wrap(Wrap { trim: true }),
         inner,
@@ -837,7 +717,6 @@ pub fn render_load_error(f: &mut Frame, area: Rect, title: &str) {
 #[cfg(test)]
 mod render_tests {
     use super::*;
-    use ratatui::{backend::TestBackend, Terminal};
 
     fn line_text(line: &Line) -> String {
         line.spans.iter().map(|s| s.content.as_ref()).collect()
@@ -894,54 +773,59 @@ mod render_tests {
     }
 
     #[test]
-    fn only_the_focused_row_of_a_focused_pane_shows_the_change_cue() {
-        let focused = row(true, "Mode", "toggle");
-        let other = row(false, "Key", "HOME");
-        assert!(line_text(&form_line(&focused, false, true, 6, 40)).contains("◂ toggle ▸"));
-        assert!(!line_text(&form_line(&other, false, true, 6, 40)).contains('◂'));
-        // Focus in the section list: nothing in the form is highlighted.
-        assert!(!line_text(&form_line(&focused, false, false, 6, 40)).contains('◂'));
+    fn only_the_focused_row_of_a_focused_page_shows_the_cursor() {
+        let focused = row(true, "Key", "HOME");
+        let other = row(false, "Cancel", "ESC");
+        let text = line_text(&form_line(&focused, false, true, 6, 40));
+        assert!(text.starts_with("› Key"), "{text:?}");
+        assert!(text.contains("‹ HOME ›"), "{text:?}");
+        assert!(!line_text(&form_line(&other, false, true, 6, 40)).contains('‹'));
+        // Focus in the page list: nothing in the page is highlighted.
+        let unfocused = line_text(&form_line(&focused, false, false, 6, 40));
+        assert!(!unfocused.contains('›') && !unfocused.contains('‹'));
+    }
+
+    #[test]
+    fn few_valued_settings_show_every_choice() {
+        let r = row(false, "Mode", "Toggle").choices(&["Hold to talk", "Toggle"]);
+        let text = line_text(&form_line(&r, false, true, 6, 60));
+        assert!(text.contains(" Hold to talk  Toggle "), "{text:?}");
+        // Switches get On and Off without asking.
+        let s = row(false, "Sounds", "Off");
+        assert!(line_text(&form_line(&s, false, true, 6, 60)).contains(" On  Off "));
+    }
+
+    #[test]
+    fn choices_that_do_not_fit_fall_back_to_the_value() {
+        let r = row(true, "Mode", "Toggle").choices(&["Hold to talk", "Toggle"]);
+        let text = line_text(&form_line(&r, false, true, 6, 24));
+        assert!(text.contains("‹ Toggle ›"), "{text:?}");
     }
 
     #[test]
     fn unsaved_rows_carry_a_marker_that_is_not_only_color() {
-        let r = row(false, "Mode", "toggle");
-        assert!(line_text(&form_line(&r, true, true, 6, 40)).starts_with("● "));
-        assert!(line_text(&form_line(&r, false, true, 6, 40)).starts_with("  "));
+        let r = row(false, "Mode", "x");
+        assert!(line_text(&form_line(&r, true, true, 6, 40)).contains("Mode   ●"));
+        assert!(!line_text(&form_line(&r, false, true, 6, 40)).contains('●'));
     }
 
     #[test]
-    fn rows_being_typed_into_show_no_change_cue() {
+    fn rows_being_typed_into_show_the_caret_not_the_arrows() {
         let r = row(true, "Key", &format!("HO{}ME", CARET));
         let text = line_text(&form_line(&r, false, true, 6, 40));
-        assert!(!text.contains('◂'));
+        assert!(!text.contains('‹'));
         assert!(text.contains("HO│ME"));
     }
 
-    fn status_text(dirty: bool, feedback: Option<(FeedbackLevel, &str)>) -> String {
-        let mut terminal = Terminal::new(TestBackend::new(70, 1)).unwrap();
-        terminal
-            .draw(|f| render_status_line(f, f.area(), dirty, false, feedback))
-            .unwrap();
-        let buffer = terminal.backend().buffer().clone();
-        buffer.content().iter().map(|c| c.symbol()).collect()
-    }
-
     #[test]
-    fn status_line_reports_outcome_then_unsaved_then_saved() {
-        let saved = status_text(false, Some((FeedbackLevel::Ok, "Saved")));
-        assert!(saved.trim_start().starts_with("✓ Saved"), "{saved:?}");
-        let failed = status_text(true, Some((FeedbackLevel::Err, "save: bad value")));
-        assert!(
-            failed.trim_start().starts_with("✗ save: bad value"),
-            "{failed:?}"
-        );
-        let dirty = status_text(true, None);
-        assert!(
-            dirty.trim_start().starts_with("● Not saved yet"),
-            "{dirty:?}"
-        );
-        let clean = status_text(false, None);
-        assert!(clean.trim_start().starts_with("All saved"), "{clean:?}");
+    fn the_heading_that_repeats_the_label_is_dropped() {
+        let lines = vec![
+            Line::from(Span::styled("Mode", theme::heading())),
+            Line::from(""),
+            Line::from("Body."),
+        ];
+        let body = description_body(lines);
+        assert_eq!(body.len(), 1);
+        assert_eq!(line_text(&body[0]), "Body.");
     }
 }

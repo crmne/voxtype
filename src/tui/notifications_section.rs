@@ -1,16 +1,11 @@
 //! Desktop notifications section.
 
 use crossterm::event::{KeyCode, KeyEvent};
-use ratatui::{
-    layout::Rect,
-    text::{Line, Span},
-    Frame,
-};
+use ratatui::{layout::Rect, text::Line, Frame};
 
 use super::app::{Action, App};
 use super::common::{self, FeedbackLevel, FormRowSpec};
 use super::config_editor::{ConfigEditor, EditorError};
-use super::theme;
 
 #[derive(Debug, Clone)]
 pub struct NotificationsState {
@@ -58,7 +53,10 @@ impl NotificationsState {
         let mut ed = match ConfigEditor::load() {
             Ok(e) => e,
             Err(e) => {
-                self.feedback = Some((FeedbackLevel::Err, format!("load: {}", e)));
+                self.feedback = Some((
+                    FeedbackLevel::Err,
+                    format!("Couldn't read the config: {}", e),
+                ));
                 return Action::None;
             }
         };
@@ -74,7 +72,7 @@ impl NotificationsState {
                     format!("Saved to {}", ed.path().display()),
                 ));
             }
-            Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),
+            Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("Not saved: {}", e))),
         }
         Action::None
     }
@@ -83,7 +81,7 @@ impl NotificationsState {
             let field = self.field;
             *self = fresh;
             self.field = field;
-            self.feedback = Some((FeedbackLevel::Ok, "Reverted".to_string()));
+            self.feedback = Some((FeedbackLevel::Ok, "Put back the saved settings".to_string()));
         }
     }
     fn move_field(&mut self, delta: i32) {
@@ -106,29 +104,22 @@ impl NotificationsState {
     }
 }
 
-pub fn render(f: &mut Frame, area: Rect, app: &App) {
-    let state = match &app.notifications {
-        Some(s) => s,
-        None => {
-            common::render_load_error(f, area, "Notifications");
-            return;
-        }
-    };
-
-    let rows = vec![
+/// The page's rows, from its in-memory settings.
+pub fn rows(state: &NotificationsState) -> Vec<FormRowSpec> {
+    vec![
         FormRowSpec::new(
             state.field == Field::OnStart,
-            "On recording start",
+            "When recording starts",
             yesno(state.on_recording_start),
         ),
         FormRowSpec::new(
             state.field == Field::OnStop,
-            "On recording stop",
+            "When recording stops",
             yesno(state.on_recording_stop),
         ),
         FormRowSpec::new(
             state.field == Field::OnTranscription,
-            "Show transcribed text",
+            "With the text",
             yesno(state.on_transcription),
         ),
         FormRowSpec::new(
@@ -136,21 +127,24 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
             "Engine icon in title",
             yesno(state.show_engine_icon),
         ),
-    ];
+    ]
+}
 
+pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let Some(state) = &app.notifications else {
+        common::render_load_error(f, area, app);
+        return;
+    };
     let feedback_pair = state
         .feedback
         .as_ref()
         .map(|(lvl, msg)| (*lvl, msg.as_str()));
-
     common::render_form_with_guidance(
         f,
         area,
         app,
-        "Desktop Notifications",
-        state.dirty_since_load,
         feedback_pair,
-        &rows,
+        &rows(state),
         guidance_for_field(state),
     );
 }
@@ -159,69 +153,25 @@ fn yesno(b: bool) -> String {
     common::on_off(b)
 }
 
-fn heading<'a>(text: &'a str) -> Line<'a> {
-    Line::from(Span::styled(text, theme::heading()))
-}
-
 fn guidance_for_field(state: &NotificationsState) -> Vec<Line<'_>> {
+    let text = |s: &'static str| Line::from(s);
     match state.field {
-        Field::OnStart => vec![
-            heading("On recording start"),
-            Line::from(""),
-            Line::from(
-                "Fires a desktop notification the moment voxtype begins \
-                 capturing audio.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Useful when you have audio feedback off and want a visual \
-                 cue. Most users leave this off — the recording indicator in \
-                 Waybar covers it.",
-            ),
-        ],
-        Field::OnStop => vec![
-            heading("On recording stop"),
-            Line::from(""),
-            Line::from(
-                "Notifies when voxtype stops recording and starts \
-                 transcribing. Helpful when transcription takes a few \
-                 seconds — you know voxtype heard the stop.",
-            ),
-        ],
-        Field::OnTranscription => vec![
-            heading("Show transcribed text"),
-            Line::from(""),
-            Line::from(
-                "After transcription completes, posts the transcript text \
-                 in a desktop notification.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Most useful when output goes to the wrong window (e.g. you \
-                 changed focus mid-dictation). The notification is the \
-                 receipt.",
-            ),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Notifications go through libnotify, so they respect mako/\
-                 dunst/KDE/GNOME settings.",
-                theme::muted(),
-            )),
-        ],
-        Field::ShowEngineIcon => vec![
-            heading("Engine icon in title"),
-            Line::from(""),
-            Line::from(
-                "Prefixes the notification title with an engine icon \
-                 (🦜 for Parakeet, 🗣️ for Whisper) so you can see at a \
-                 glance which engine produced the transcript.",
-            ),
-            Line::from(""),
-            Line::from(
-                "Helpful when you switch engines often or run multiple \
-                 voxtype configurations side by side.",
-            ),
-        ],
+        Field::OnStart => vec![text(
+            "A notification as soon as voxtype starts listening. Most people \
+             rely on the sound, the overlay or Waybar instead.",
+        )],
+        Field::OnStop => vec![text(
+            "A notification when recording stops and transcription begins, so \
+             you know the stop was heard.",
+        )],
+        Field::OnTranscription => vec![text(
+            "Shows what was transcribed, which helps when the text went to the \
+             wrong window.",
+        )],
+        Field::ShowEngineIcon => vec![text(
+            "Puts the engine's icon in the notification title, handy if you \
+             switch engines.",
+        )],
     }
 }
 
