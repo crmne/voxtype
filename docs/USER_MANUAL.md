@@ -146,33 +146,48 @@ The launcher script picks the first available terminal emulator (`$TERMINAL`,
 then ghostty / alacritty / kitty / foot / wezterm / konsole / xterm / xfce4-terminal) and
 sets the window class to `voxtype` so compositors can float it.
 
+The header shows which config file is being edited (the `-c/--config` path
+when you pass one) and whether the daemon is running. Each section shows its
+settings with an explanation of the selected one beside it, or below it on
+terminals narrower than about 120 columns. The TUI fits an 80x24 terminal
+and takes its colors from your terminal theme.
+
+Edits stay in memory until you save. A setting you changed but have not
+saved is marked with `●`, as is its section in the list, and the line under
+the section says whether everything is saved. Quitting asks first only when
+something is unsaved.
+
 #### Sections
 
-| Section | What it covers |
-|---|---|
-| General | Active engine, variant binary, daemon status, hardware-aware variant recommendation |
-| Engine | Per-engine tuning for Whisper / Parakeet / Moonshine / SenseVoice / Paraformer / Dolphin / Omnilingual / Cohere |
-| Hotkey | PTT key, mode (PTT vs toggle), cancel key, modifier key, evdev-listener toggle |
-| Audio | Input device, max recording length, MPRIS pause/ducking, audio feedback theme/volume |
-| Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
-| Text | Spoken-punctuation toggle, smart-auto-submit, custom replacements list editor |
-| VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
-| Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
-| Notifications | Desktop notifications for recording start/stop and transcription |
-| Waybar | Status integration: icon theme + per-state icon overrides |
-| Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
+| Group | Section | What it covers |
+|---|---|---|
+| Setup | General | Active engine, variant binary, daemon status, hardware-aware variant recommendation |
+| Setup | Engine | Per-engine tuning for Whisper / Parakeet / Moonshine / SenseVoice / Paraformer / Dolphin / Omnilingual / Cohere |
+| Recording | Hotkey | PTT key, mode (PTT vs toggle), cancel key, modifier key, evdev-listener toggle |
+| Recording | Audio | Input device, max recording length, MPRIS pause/ducking, audio feedback theme/volume |
+| Recording | VAD | Silero VAD enable, backend (auto/energy/whisper), threshold |
+| Transcript | Output | Mode (type/clipboard/paste/file), driver order, auto-submit, post-process command |
+| Transcript | Text | Spoken-punctuation toggle, smart-auto-submit, custom replacements list editor |
+| Status | Notifications | Desktop notifications for recording start/stop and transcription |
+| Status | OSD | On-screen waveform: frontend, style, position, size, opacity |
+| Status | Waybar | Status integration: icon theme + per-state icon overrides |
+| More | Meeting | Meeting mode enable, speaker diarization, audio source (mic/system/both) |
+| More | Advanced | GPU isolation, on-demand model loading, flash attention, eager processing, GPU device |
 
 #### Keyboard
 
+The footer always lists the keys for whatever has focus; `?` lists them all.
+
 ```
-Global         Tab / Esc focus toggle    ?  help overlay   q quit
-Sidebar        ↑↓ / jk navigate          Enter / → / l open section
-Section form   ↑↓ navigate fields        ←→ / hl cycle value
-               Space toggle              Enter / i edit text field
-               s save                    r revert
-Text editor    type insert               ←→ / Home / End / Ctrl-A/E
+Anywhere       Tab switch list/section   Esc back, then quit   q quit
+               ?  all keys               F2 General            PgUp/PgDn scroll About
+Section list   ↑↓ / jk choose            Enter / → / l open
+Settings       ↑↓ / jk choose setting    ←→ / hl change value
+               Space toggle              Enter / i type a value
+               s save section            r revert section
+Typing         type insert               ←→ / Home / End move
                Backspace / Delete        Ctrl-W delete word
-               Ctrl-U clear              Enter commit / Esc cancel
+               Ctrl-U clear              Enter apply / Esc cancel
 ```
 
 Press `?` from anywhere in the TUI for the same reference as a popup.
