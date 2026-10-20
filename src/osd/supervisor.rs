@@ -52,30 +52,16 @@ const HEALTHY_RUN: Duration = Duration::from_secs(60);
 const RAPID_FAIL_THRESHOLD: u32 = 3;
 const RAPID_FAIL_WINDOW: Duration = Duration::from_secs(5);
 
-/// Locate the `voxtype-osd` dispatcher that belongs to this daemon.
-///
-/// Packages install it in `/usr/lib/voxtype/` next to the CPU variants,
-/// but the GPU variants live one level down (`/usr/lib/voxtype/cuda-13/`,
-/// `migraphx/`, ...), and `current_exe` resolves the `/usr/bin/voxtype`
-/// symlink to that subdirectory. Checking the parent too keeps those
-/// daemons on their own package's dispatcher instead of whatever
-/// `voxtype-osd` comes first on PATH (a stale `~/.local/bin` copy could
-/// otherwise launch a different frontend than the config asks for).
 fn resolve_osd_binary() -> PathBuf {
     if let Ok(current) = std::env::current_exe() {
-        if let Some(found) = sibling_or_parent(&current, OSD_BINARY) {
-            return found;
+        if let Some(dir) = current.parent() {
+            let sibling = dir.join(OSD_BINARY);
+            if sibling.is_file() {
+                return sibling;
+            }
         }
     }
     PathBuf::from(OSD_BINARY)
-}
-
-fn sibling_or_parent(exe: &Path, name: &str) -> Option<PathBuf> {
-    let dir = exe.parent()?;
-    std::iter::once(dir)
-        .chain(dir.parent())
-        .map(|d| d.join(name))
-        .find(|p| p.is_file())
 }
 
 /// Spawn a tokio task that supervises `voxtype-osd`. The returned handle's
@@ -204,35 +190,5 @@ async fn supervise(configured: OsdFrontend) {
 
         tokio::time::sleep(backoff).await;
         backoff = (backoff * 2).min(RESTART_MAX);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn finds_dispatcher_beside_or_above_gpu_variant() {
-        let root = tempfile::tempdir().unwrap();
-        let lib = root.path().join("usr/lib/voxtype");
-        let cuda = lib.join("cuda-13");
-        std::fs::create_dir_all(&cuda).unwrap();
-        let exe = cuda.join("voxtype-onnx-cuda-13");
-        std::fs::write(&exe, "").unwrap();
-
-        assert_eq!(sibling_or_parent(&exe, OSD_BINARY), None);
-
-        std::fs::write(lib.join(OSD_BINARY), "").unwrap();
-        assert_eq!(
-            sibling_or_parent(&exe, OSD_BINARY),
-            Some(lib.join(OSD_BINARY))
-        );
-
-        // A dispatcher next to the binary itself wins over the parent's.
-        std::fs::write(cuda.join(OSD_BINARY), "").unwrap();
-        assert_eq!(
-            sibling_or_parent(&exe, OSD_BINARY),
-            Some(cuda.join(OSD_BINARY))
-        );
     }
 }
