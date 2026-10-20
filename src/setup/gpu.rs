@@ -106,7 +106,7 @@ fn parse_ldd_missing(output: &str) -> Vec<String> {
 /// Returns `None` when the check cannot be performed (no provider library
 /// alongside the binary, or no `ldd`), and `Some(vec![])` when every
 /// dependency resolves.
-fn unresolved_provider_deps(binary_name: &str) -> Option<Vec<String>> {
+pub(crate) fn unresolved_provider_deps(binary_name: &str) -> Option<Vec<String>> {
     unresolved_provider_deps_at(&Path::new(VOXTYPE_LIB_DIR).join(binary_name))
 }
 
@@ -168,6 +168,18 @@ fn warn_if_provider_unloadable(binary_name: &str) {
     }
     for line in provider_fix_lines(binary_name, &missing) {
         println!("           {line}");
+    }
+}
+
+/// What to install when an ONNX GPU variant's execution provider can't load.
+/// Used by `voxtype doctor`; `voxtype setup gpu` uses [`provider_fix_lines`].
+pub(crate) fn provider_runtime_hint(binary_name: &str) -> Option<&'static str> {
+    if binary_name.contains("migraphx") || binary_name.contains("rocm") {
+        Some("Install the AMD runtime, e.g. on Arch: sudo pacman -S migraphx rocm-hip-runtime")
+    } else if binary_name.contains("cuda") {
+        Some("Install the matching NVIDIA CUDA runtime for this variant.")
+    } else {
+        None
     }
 }
 

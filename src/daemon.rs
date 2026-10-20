@@ -4075,21 +4075,7 @@ impl Daemon {
             .as_deref()
             .unwrap_or("the running binary");
         let title = format!("Voxtype: {} unavailable", mismatch.configured_engine);
-        let body = match &mismatch.remediation {
-            crate::setup::variant_check::Remediation::SwitchToVariant { target } => format!(
-                "{} was built without --features {}. \
-                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
-                 to switch to {}.",
-                active,
-                mismatch.required_feature,
-                target.binary_name(),
-            ),
-            crate::setup::variant_check::Remediation::Rebuild { feature } => format!(
-                "This source build was compiled without --features {}. \
-                 Rebuild voxtype with that feature to enable the {} engine.",
-                feature, mismatch.configured_engine,
-            ),
-        };
+        let body = mismatch.explanation();
 
         tracing::warn!(
             engine = mismatch.configured_engine,
@@ -4174,6 +4160,14 @@ impl Daemon {
         #[cfg(target_os = "linux")]
         self.warn_on_missing_display_env();
         self.warn_on_unloadable_gpu_provider();
+
+        // Everything else the config depends on (model, VAD model, output
+        // tools, display env, OSD, meeting tools): one grouped notification
+        // for errors, warnings to the log. Stats, PATH lookups and env reads
+        // only, and before model loading so a missing model is reported
+        // even though the load below then fails. `voxtype doctor` runs the
+        // full set.
+        crate::setup::doctor::startup_summary(&self.config).await;
 
         // Streaming dictation types characters at the cursor while the user is
         // still holding the PTT key. On Wayland compositors backed by libinput
