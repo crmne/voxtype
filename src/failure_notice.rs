@@ -111,7 +111,7 @@ pub fn model_load_failed(
             title: format!("Voxtype: {label} engine unavailable"),
             body: format!(
                 "{}. {consequence} Switch to a build that includes it with \
-                 `sudo voxtype setup onnx --enable` (or press F2 in `voxtype configure`), \
+                 `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press Enter on the Build row), \
                  or choose another engine with `voxtype setup model`.",
                 detail(&err.to_string()),
             ),

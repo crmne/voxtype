@@ -46,7 +46,7 @@ impl VariantMismatch {
         match &self.remediation {
             Remediation::SwitchToVariant { target } => format!(
                 "{} was built without --features {}. \
-                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press F2) \
+                 Run `sudo voxtype setup onnx --enable` (or open `voxtype configure` and press Enter on the Build row) \
                  to switch to {}.",
                 active,
                 self.required_feature,
