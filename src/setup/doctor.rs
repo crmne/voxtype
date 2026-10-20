@@ -473,24 +473,23 @@ pub fn osd_check(config: &Config, find: impl Fn(&str) -> Option<PathBuf>) -> Opt
             "Install a voxtype package that ships the OSD, or set [osd] enabled = false",
         ));
     }
-    let preferred = config.osd.frontend;
-    let chain = match preferred {
-        OsdFrontend::Gtk4 => [
-            OsdFrontend::Gtk4,
-            OsdFrontend::Native,
-            OsdFrontend::Quickshell,
-        ],
-        OsdFrontend::Native => [
-            OsdFrontend::Native,
-            OsdFrontend::Gtk4,
-            OsdFrontend::Quickshell,
-        ],
-        OsdFrontend::Quickshell => [
-            OsdFrontend::Quickshell,
-            OsdFrontend::Gtk4,
-            OsdFrontend::Native,
-        ],
+    // Resolve `auto` the way the voxtype-osd wrapper does (see
+    // crate::osd::select): Quickshell on Omarchy when it can run, else GTK4.
+    let preferred = match config.osd.frontend {
+        OsdFrontend::Auto => {
+            let omarchy = !crate::osd::theme::omarchy_current_dirs().is_empty();
+            if omarchy
+                && find(OsdFrontend::Quickshell.binary_name()).is_some()
+                && find(crate::osd::select::QS_BIN).is_some()
+            {
+                OsdFrontend::Quickshell
+            } else {
+                OsdFrontend::Gtk4
+            }
+        }
+        explicit => explicit,
     };
+    let chain = crate::osd::select::fallback_chain(preferred);
     let Some(resolved) = chain.into_iter().find(|f| find(f.binary_name()).is_some()) else {
         return Some(Check::warn(
             ID,
