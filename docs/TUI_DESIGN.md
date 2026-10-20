@@ -58,6 +58,18 @@ what, and offers save, discard or keep editing. A save that fails while
 quitting keeps the TUI open on the failing section with its error, instead of
 quitting with the edit lost.
 
+## Saved versus in use
+
+The daemon, and the OSD it supervises as a child process, read the config
+only when they start; neither watches the file. So a save is not in use
+until voxtype restarts. While that is true the header says `! R to apply`,
+the status line says what R does, and the footer offers `R apply`. R asks
+first, saying what it restarts and the exact command
+(`systemctl --user restart voxtype`), then reports the result and the
+pending state clears. Quitting also restarts voxtype when a save is
+pending. Every message names the key or the exact command; none says
+"restart X" without saying how.
+
 ## Interaction
 
 - One focus at a time: the section list or the open section. The focused

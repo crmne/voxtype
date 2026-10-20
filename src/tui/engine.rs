@@ -1891,8 +1891,8 @@ fn model_guidance(engine: &str, current: &str) -> Vec<Line<'static>> {
         lines.push(Line::from(""));
     }
     lines.push(Line::from(Span::styled(
-        "Models you haven't downloaded yet show up here too. Switch to one, \
-         save, then run `voxtype setup model` to fetch the weights.",
+        "Models you haven't downloaded yet show up here too. Switch to one \
+         and save with s; the download starts right away.",
         theme::muted(),
     )));
     if engine == "cohere" {

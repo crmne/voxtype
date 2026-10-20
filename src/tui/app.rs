@@ -8,6 +8,7 @@ use std::path::Path;
 
 use super::advanced_section::AdvancedState;
 use super::audio::AudioState;
+use super::common::FeedbackLevel;
 use super::engine::EngineState;
 use super::hotkey::HotkeyState;
 use super::meeting_section::MeetingState;
@@ -100,6 +101,14 @@ pub struct App {
     /// True while the save-on-exit prompt is showing. Cleared when the user
     /// picks Save (s), Discard (d), or Cancel (Esc/c).
     pub quit_pending: bool,
+    /// True while the "Restart voxtype now?" confirmation is showing.
+    pub restart_prompt: bool,
+    /// `restart_pending()` as of the frame being drawn, so the header,
+    /// status line and footer agree without each stat-ing the file.
+    pub apply_pending: Cell<bool>,
+    /// App-wide result line (the last restart), shown in the status line in
+    /// place of the open section's own message until the next key.
+    pub notice: Option<(FeedbackLevel, String)>,
     /// If the configured engine's model isn't downloaded, this holds the
     /// model name so the General banner can prompt the user to fetch it.
     /// Computed at load time and on `refresh_inventory()`.
@@ -139,7 +148,6 @@ pub struct App {
 pub struct MissingModel {
     pub engine: String,
     pub model: String,
-    pub setup_command: &'static str,
 }
 
 /// Build the inventory and, if `force_package_mode` is set, override the
@@ -186,6 +194,9 @@ impl App {
             guidance_scroll: Cell::new(0),
             baselines: RefCell::new(HashMap::new()),
             quit_pending: false,
+            restart_prompt: false,
+            apply_pending: Cell::new(false),
+            notice: None,
             missing_model: detect_missing_model(),
             variant_mismatch,
             config_synced_mtime: config_file_mtime(),
@@ -416,6 +427,62 @@ impl App {
         self.cursor = (new_r, new_c);
     }
 
+    /// True when a save landed after the running daemon last read the
+    /// config. The daemon and the OSD it supervises read their settings
+    /// only when they start, so saved changes are not in effect until
+    /// voxtype restarts. A stopped daemon has nothing to restart: it reads
+    /// the file when it next starts.
+    pub fn restart_pending(&self) -> bool {
+        should_restart_on_quit(
+            is_daemon_running(),
+            self.config_synced_mtime,
+            config_file_mtime(),
+        )
+    }
+
+    /// Restart (or start, when stopped) the voxtype service, which restarts
+    /// the OSD it supervises too, and record the outcome as the app-wide
+    /// notice. Returns whether systemctl succeeded.
+    pub fn restart_daemon(&mut self) -> bool {
+        let verb = if is_daemon_running() {
+            "restart"
+        } else {
+            "start"
+        };
+        let result = std::process::Command::new("systemctl")
+            .args(["--user", verb, "voxtype"])
+            .output();
+        let ok = matches!(&result, Ok(out) if out.status.success());
+        self.notice = Some(match result {
+            Ok(out) if out.status.success() => {
+                // The daemon just read the config as it stands now.
+                self.config_synced_mtime = config_file_mtime();
+                self.restart_needed = false;
+                (
+                    FeedbackLevel::Ok,
+                    format!("voxtype and its OSD {}ed with the saved settings", verb),
+                )
+            }
+            Ok(out) => {
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                let detail = stderr.lines().next().unwrap_or("no error output");
+                (
+                    FeedbackLevel::Err,
+                    format!("systemctl --user {} voxtype failed: {}", verb, detail),
+                )
+            }
+            Err(e) => (
+                FeedbackLevel::Err,
+                format!(
+                    "Could not run systemctl ({}). Restart voxtype the way you started it.",
+                    e
+                ),
+            ),
+        });
+        self.refresh_inventory();
+        ok
+    }
+
     pub fn record_switch_attempt(&mut self, variant: Variant, result: Result<(), String>) {
         let (success, message) = match result {
             Ok(()) => (true, format!("Switched to {}.", variant.display())),
@@ -484,19 +551,14 @@ fn detect_variant_mismatch(inventory: &Inventory) -> Option<VariantMismatch> {
 fn detect_missing_model() -> Option<MissingModel> {
     use crate::config;
     let cfg = config::load_config(None).ok()?;
-    let (engine_name, model, setup_command) = match cfg.engine {
-        config::TranscriptionEngine::Whisper => (
-            "whisper",
-            cfg.whisper.model.clone(),
-            "voxtype setup --download",
-        ),
+    let (engine_name, model) = match cfg.engine {
+        config::TranscriptionEngine::Whisper => ("whisper", cfg.whisper.model.clone()),
         config::TranscriptionEngine::Parakeet => (
             "parakeet",
             cfg.parakeet
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::Moonshine => (
             "moonshine",
@@ -504,7 +566,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::SenseVoice => (
             "sensevoice",
@@ -512,7 +573,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::Paraformer => (
             "paraformer",
@@ -520,7 +580,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::Dolphin => (
             "dolphin",
@@ -528,7 +587,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         config::TranscriptionEngine::Omnilingual => (
             "omnilingual",
@@ -536,7 +594,6 @@ fn detect_missing_model() -> Option<MissingModel> {
                 .as_ref()
                 .map(|c| c.model.clone())
                 .unwrap_or_default(),
-            "voxtype setup --download",
         ),
         // Cohere — checked but model layout differs by rc/0.7.0; skip the
         // disk probe rather than emit a false-positive missing warning.
@@ -558,7 +615,6 @@ fn detect_missing_model() -> Option<MissingModel> {
         Some(MissingModel {
             engine: engine_name.to_string(),
             model,
-            setup_command,
         })
     }
 }

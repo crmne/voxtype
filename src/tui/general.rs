@@ -10,10 +10,9 @@ use ratatui::{
     Frame,
 };
 
-use super::app::{Action, App, SwitchOutcome, COLS, ROWS};
+use super::app::{Action, App, COLS, ROWS};
 use super::common::{self, FeedbackLevel};
 use super::theme;
-use std::process::Command;
 
 /// Width of the label column in the Status pane.
 const FACT_LABEL_WIDTH: usize = 9;
@@ -22,11 +21,16 @@ const FACT_LABEL_WIDTH: usize = 9;
 const FAMILY_COLUMN_WIDTH: usize = 9;
 
 pub fn render(f: &mut Frame, area: Rect, app: &App) {
+    let (level, message) = status_message(app);
+    let status_rows = match level {
+        Some(level) => common::status_height(area.width, false, false, Some((level, &message))),
+        None => 1,
+    };
     let [body, status] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Min(3), Constraint::Length(status_rows)])
         .areas(area);
-    render_status_line(f, status, app);
+    render_status_line(f, status, level, &message);
 
     let facts = fact_lines(app, body.width.saturating_sub(4) as usize);
     let [info, rest] = Layout::default()
@@ -65,8 +69,10 @@ pub fn render(f: &mut Frame, area: Rect, app: &App) {
 
 /// What the line under General says: the outcome of the last switch,
 /// download or daemon action, then a pending restart, then nothing to save.
-fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
-    let (level, message) = if let Some(outcome) = &app.last_switch {
+fn status_message(app: &App) -> (Option<FeedbackLevel>, String) {
+    if let Some((level, message)) = &app.notice {
+        (Some(*level), message.clone())
+    } else if let Some(outcome) = &app.last_switch {
         let level = if outcome.success {
             FeedbackLevel::Ok
         } else {
@@ -76,16 +82,24 @@ fn render_status_line(f: &mut Frame, area: Rect, app: &App) {
     } else if app.restart_needed {
         (
             Some(FeedbackLevel::Warn),
-            "Restart the daemon to use the new binary: press D".to_string(),
+            "The new binary isn't running yet: R restarts voxtype with it".to_string(),
+        )
+    } else if app.apply_pending.get() {
+        (
+            Some(FeedbackLevel::Warn),
+            "Saved settings aren't in use yet: R restarts voxtype and its OSD".to_string(),
         )
     } else {
         (
             None,
             "Changes here apply at once; nothing to save.".to_string(),
         )
-    };
+    }
+}
+
+fn render_status_line(f: &mut Frame, area: Rect, level: Option<FeedbackLevel>, message: &str) {
     match level {
-        Some(level) => common::render_status_line(f, area, false, Some((level, &message))),
+        Some(level) => common::render_status_line(f, area, false, false, Some((level, message))),
         None => f.render_widget(
             Paragraph::new(Span::styled(
                 common::truncate(&message, area.width.saturating_sub(2) as usize),
@@ -177,8 +191,8 @@ fn fact_lines(app: &App, width: usize) -> Vec<Line<'static>> {
 
     if let Some(missing) = &app.missing_model {
         let text = format!(
-            "{} model {} not downloaded. Run `{}`",
-            missing.engine, missing.model, missing.setup_command
+            "{} model {} not downloaded. M downloads it",
+            missing.engine, missing.model
         );
         lines.push(common::fact_line(
             "Model",
@@ -739,10 +753,21 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
             app.refresh_inventory();
             Action::None
         }
+        // D predates the global R; it restarts at once, without asking.
         KeyCode::Char('D') => {
-            start_or_restart_daemon(app);
+            app.last_switch = None;
+            app.restart_daemon();
             Action::None
         }
+        // Fetch the configured engine's missing model, the same download
+        // the Engine section runs after a save.
+        KeyCode::Char('M') => match &app.missing_model {
+            Some(missing) => Action::DownloadModel {
+                engine: missing.engine.clone(),
+                model: missing.model.clone(),
+            },
+            None => Action::None,
+        },
         KeyCode::Up | KeyCode::Char('k') => {
             app.move_cursor(-1, 0);
             Action::None
@@ -765,48 +790,6 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
         },
         _ => Action::None,
     }
-}
-
-/// Run `systemctl --user start|restart voxtype` and report the outcome via
-/// the existing General-banner switch outcome line. Choice between start and
-/// restart is based on the cached `daemon_running` flag; refreshing the
-/// inventory afterwards reconciles the displayed status.
-fn start_or_restart_daemon(app: &mut App) {
-    let action = if app.daemon_running {
-        "restart"
-    } else {
-        "start"
-    };
-
-    let result = Command::new("systemctl")
-        .args(["--user", action, "voxtype"])
-        .output();
-
-    let outcome = match result {
-        Ok(out) if out.status.success() => SwitchOutcome {
-            success: true,
-            message: format!("voxtype daemon {}ed", action),
-        },
-        Ok(out) => {
-            let stderr = String::from_utf8_lossy(&out.stderr);
-            let detail = stderr.lines().next().unwrap_or("(no stderr)");
-            SwitchOutcome {
-                success: false,
-                message: format!("systemctl --user {} voxtype failed: {}", action, detail),
-            }
-        }
-        Err(e) => SwitchOutcome {
-            success: false,
-            message: format!(
-                "could not invoke systemctl: {}. Is the user systemd instance running?",
-                e
-            ),
-        },
-    };
-
-    app.last_switch = Some(outcome);
-    app.restart_needed = false;
-    app.refresh_inventory();
 }
 
 /// Variant under the cursor, but only if switching to it makes sense:

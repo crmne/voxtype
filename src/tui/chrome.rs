@@ -53,8 +53,19 @@ pub fn render_too_small(f: &mut Frame, area: Rect) {
 /// The top rule: what this is and which file it edits on the left, the
 /// daemon that will act on the saved settings on the right. On narrow
 /// terminals the daemon text shortens first, then the path goes.
-pub fn render_header(f: &mut Frame, area: Rect) {
-    let (daemon_full, daemon_short, daemon_style) = daemon_status();
+///
+/// While saved settings wait for a restart, the right side says so instead,
+/// with the key that applies them, until the restart happens.
+pub fn render_header(f: &mut Frame, area: Rect, app: &App) {
+    let (daemon_full, daemon_short, daemon_style) = if app.apply_pending.get() {
+        (
+            "! saved, not in use yet · R restarts voxtype".to_string(),
+            "! R to apply".to_string(),
+            theme::warn(),
+        )
+    } else {
+        daemon_status()
+    };
     let line = header_line(
         area.width as usize,
         &common::display_config_path(),
@@ -202,6 +213,9 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("Esc", "keep editing"),
         ];
     }
+    if app.restart_prompt {
+        return vec![("Enter", "restart voxtype"), ("Esc", "not now")];
+    }
     if app.help_open {
         return vec![("↑↓", "scroll"), ("any key", "close")];
     }
@@ -214,37 +228,44 @@ pub fn footer_hints(app: &App) -> Vec<(&'static str, &'static str)> {
             ("Ctrl-W", "delete word"),
         ];
     }
-    if app.sidebar_focused {
-        return vec![
-            ("↑↓", "section"),
-            ("Enter", "open"),
-            ("Tab", "settings"),
-            ("?", "keys"),
-            ("q", "quit"),
-        ];
+    // While saved settings wait for a restart, the key that applies them
+    // ranks right after the keys of the current task.
+    let apply = ("R", "apply");
+    let pending = app.apply_pending.get();
+    let mut hints = if app.sidebar_focused {
+        vec![("↑↓", "section"), ("Enter", "open")]
+    } else if app.current_section == Section::General {
+        let mut general = vec![("↑↓←→", "variant"), ("Enter", "switch")];
+        if app.missing_model.is_some() {
+            general.push(("M", "download model"));
+        }
+        general.push(("r", "refresh"));
+        general
+    } else {
+        vec![
+            ("↑↓", "setting"),
+            ("←→", "change"),
+            ("Enter", "edit"),
+            ("s", "save"),
+            ("r", "revert"),
+        ]
+    };
+    if pending {
+        hints.push(apply);
+    } else if app.current_section == Section::General && !app.sidebar_focused {
+        hints.push(("R", "restart voxtype"));
     }
-    if app.current_section == Section::General {
-        return vec![
-            ("↑↓←→", "variant"),
-            ("Enter", "switch"),
-            ("D", "start/restart daemon"),
-            ("r", "refresh"),
-            ("Tab", "sections"),
-            ("?", "keys"),
-            ("q", "quit"),
-        ];
+    hints.push(if app.sidebar_focused {
+        ("Tab", "settings")
+    } else {
+        ("Tab", "sections")
+    });
+    if !app.sidebar_focused && app.current_section != Section::General {
+        hints.push(("PgDn", "about"));
     }
-    vec![
-        ("↑↓", "setting"),
-        ("←→", "change"),
-        ("Enter", "edit"),
-        ("s", "save"),
-        ("r", "revert"),
-        ("Tab", "sections"),
-        ("PgDn", "about"),
-        ("?", "keys"),
-        ("q", "quit"),
-    ]
+    hints.push(("?", "keys"));
+    hints.push(("q", "quit"));
+    hints
 }
 
 /// The bottom line: key hints on the left, unsaved sections on the right.
@@ -324,10 +345,74 @@ pub fn render_quit_prompt(f: &mut Frame, app: &App) {
     f.render_widget(Paragraph::new(lines), inner);
 }
 
+/// Confirmation for R. Says what a restart does, so nobody has to guess
+/// what "restart" means or which part of voxtype it touches.
+pub fn render_restart_prompt(f: &mut Frame, app: &App) {
+    let area = f.area();
+    let width = 64.min(area.width.saturating_sub(4));
+    let inner_width = width.saturating_sub(6) as usize;
+    let running = crate::daemon_status::is_daemon_running();
+    let (title, command) = if running {
+        ("Restart voxtype now?", "systemctl --user restart voxtype")
+    } else {
+        ("Start voxtype now?", "systemctl --user start voxtype")
+    };
+    let wrap = |text: &str, style| {
+        common::wrap_words(text, inner_width)
+            .into_iter()
+            .map(move |l| Line::from(Span::styled(l, style)))
+    };
+
+    let mut lines = vec![Line::from("")];
+    lines.extend(wrap(
+        "The voxtype service and the OSD it runs read their settings when \
+         they start. This restarts both with the saved config.",
+        theme::text(),
+    ));
+    if running {
+        lines.extend(wrap(
+            "A recording or transcription in progress is lost.",
+            theme::muted(),
+        ));
+    }
+    let dirty = app.dirty_sections();
+    if !dirty.is_empty() {
+        let names: Vec<&str> = dirty.iter().map(|s| s.label()).collect();
+        lines.extend(wrap(
+            &format!(
+                "Not included: unsaved changes in {}. Save them first with s.",
+                names.join(", ")
+            ),
+            theme::warn(),
+        ));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("Runs  ", theme::muted()),
+        Span::raw(truncate(command, inner_width.saturating_sub(6))),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(prompt_option("Enter", "Restart", inner_width));
+    lines.push(prompt_option("Esc", "Not now", inner_width));
+    lines.push(Line::from(""));
+
+    let rect = centered(area, width, lines.len() as u16 + 2);
+    f.render_widget(Clear, rect);
+    let block = common::pane(title, true);
+    let inner = block.inner(rect);
+    f.render_widget(block, rect);
+    let inner = Rect {
+        x: inner.x + 1,
+        width: inner.width.saturating_sub(2),
+        ..inner
+    };
+    f.render_widget(Paragraph::new(lines), inner);
+}
+
 fn prompt_option(key: &str, desc: &str, width: usize) -> Line<'static> {
     Line::from(vec![
-        Span::styled(format!("{:<5}", key), theme::key()),
-        Span::raw(truncate(desc, width.saturating_sub(5))),
+        Span::styled(format!("{:<7}", key), theme::key()),
+        Span::raw(truncate(desc, width.saturating_sub(7))),
     ])
 }
 
@@ -345,7 +430,12 @@ fn help_lines() -> Vec<Line<'static>> {
         entry("Tab", "Move between the section list and the open section"),
         entry("Esc", "Back to the section list; from there, quit"),
         entry("q, Ctrl-C", "Quit (asks first if anything is unsaved)"),
+        entry(
+            "",
+            "and restarts voxtype if saved settings aren't in use yet",
+        ),
         entry("?", "Show these keys"),
+        entry("R", "Restart voxtype and its OSD to use saved settings"),
         entry("F2", "Jump to General to pick a binary variant"),
         entry("PgUp PgDn", "Scroll the About pane"),
         Line::from(""),
@@ -372,7 +462,8 @@ fn help_lines() -> Vec<Line<'static>> {
         group("General"),
         entry("↑↓←→ hjkl", "Choose a binary variant"),
         entry("Enter", "Switch to it (asks for your password)"),
-        entry("D", "Start or restart the voxtype daemon"),
+        entry("D", "Start or restart voxtype right away, without asking"),
+        entry("M", "Download the configured model when it is missing"),
         entry("r", "Refresh"),
         Line::from(""),
         group("Markers"),

@@ -200,7 +200,7 @@ impl OsdState {
                 self.dirty_since_load = false;
                 self.feedback = Some((
                     FeedbackLevel::Ok,
-                    format!("Saved to {}. Restart OSD to apply.", ed.path().display()),
+                    format!("Saved to {}", ed.path().display()),
                 ));
             }
             Err(e) => self.feedback = Some((FeedbackLevel::Err, format!("save: {}", e))),

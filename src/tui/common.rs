@@ -397,11 +397,17 @@ pub fn fact_line<'a>(label: &str, label_width: usize, value: Vec<Span<'a>>) -> L
 }
 
 /// The status line under a section: the last save/revert outcome when there
-/// is one, otherwise whether this section holds unsaved edits.
+/// is one, otherwise whether this section holds unsaved edits, otherwise
+/// whether saved settings still wait for voxtype to restart.
+///
+/// `apply_pending` means the file holds settings the running daemon (and
+/// the OSD it supervises) has not read yet. Every message then ends with the
+/// one thing that applies them: R, or quitting.
 pub fn render_status_line(
     f: &mut Frame,
     area: Rect,
     dirty: bool,
+    apply_pending: bool,
     feedback: Option<(FeedbackLevel, &str)>,
 ) {
     // Indented to line up with the text inside the panes above.
@@ -410,8 +416,92 @@ pub fn render_status_line(
         width: area.width.saturating_sub(2),
         ..area
     };
-    let width = area.width as usize;
+    let lines = status_lines(area.width as usize, dirty, apply_pending, feedback);
+    f.render_widget(Paragraph::new(lines), area);
+}
+
+/// Most lines a status message may take. A message that tells the user to
+/// press a key must not be cut off before the key.
+const STATUS_MAX_LINES: usize = 3;
+
+/// Rows the status line needs in an area `width` cells wide.
+pub fn status_height(
+    width: u16,
+    dirty: bool,
+    apply_pending: bool,
+    feedback: Option<(FeedbackLevel, &str)>,
+) -> u16 {
+    status_lines(
+        width.saturating_sub(2) as usize,
+        dirty,
+        apply_pending,
+        feedback,
+    )
+    .len() as u16
+}
+
+/// Greedy word wrap to `width` cells.
+pub fn wrap_words(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if str_width(line) + 1 + str_width(word) <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(word.to_string()),
+        }
+    }
+    lines
+}
+
+fn status_lines(
+    width: usize,
+    dirty: bool,
+    apply_pending: bool,
+    feedback: Option<(FeedbackLevel, &str)>,
+) -> Vec<Line<'static>> {
     let line = match feedback {
+        Some((level, message)) if !(level == FeedbackLevel::Ok && apply_pending) => {
+            let message = match super::config_editor::tui_config_path() {
+                Some(full) => message.replace(&full.display().to_string(), &display_config_path()),
+                None => message.to_string(),
+            };
+            let (glyph, style) = match level {
+                FeedbackLevel::Ok => ("✓ ", theme::ok()),
+                FeedbackLevel::Err => ("✗ ", theme::error()),
+                FeedbackLevel::Warn => ("! ", theme::warn()),
+            };
+            let mut wrapped = wrap_words(&message, width.saturating_sub(2).max(1));
+            if wrapped.len() > STATUS_MAX_LINES {
+                wrapped.truncate(STATUS_MAX_LINES);
+                let last = wrapped.last_mut().expect("non-empty");
+                *last = truncate(&format!("{} …", last), width.saturating_sub(2));
+            }
+            return wrapped
+                .into_iter()
+                .enumerate()
+                .map(|(i, text)| {
+                    let lead = if i == 0 { glyph } else { "  " };
+                    Line::from(vec![
+                        Span::styled(lead, style.add_modifier(Modifier::BOLD)),
+                        Span::styled(text, style),
+                    ])
+                })
+                .collect();
+        }
+        feedback => feedback,
+    };
+    vec![status_line(width, dirty, apply_pending, line)]
+}
+
+fn status_line(
+    width: usize,
+    dirty: bool,
+    apply_pending: bool,
+    feedback: Option<(FeedbackLevel, &str)>,
+) -> Line<'static> {
+    match feedback {
         Some((level, message)) => {
             // Sections report the full path they saved to; show it the way
             // the header does.
@@ -419,7 +509,20 @@ pub fn render_status_line(
                 Some(full) => message.replace(&full.display().to_string(), &display_config_path()),
                 None => message.to_string(),
             };
-            let message = message.as_str();
+            let room = width.saturating_sub(2);
+            let message = if level == FeedbackLevel::Ok && apply_pending {
+                let base = message.trim_end_matches('.');
+                first_that_fits(
+                    &[
+                        format!("{}. In use once voxtype restarts: press R, or quit", base),
+                        format!("{}. R restarts voxtype to use it", base),
+                        "Saved. R restarts voxtype to use it".to_string(),
+                    ],
+                    room,
+                )
+            } else {
+                truncate(&message, room)
+            };
             let (glyph, style) = match level {
                 FeedbackLevel::Ok => ("✓ ", theme::ok()),
                 FeedbackLevel::Err => ("✗ ", theme::error()),
@@ -427,7 +530,22 @@ pub fn render_status_line(
             };
             Line::from(vec![
                 Span::styled(glyph, style.add_modifier(Modifier::BOLD)),
-                Span::styled(truncate(message, width.saturating_sub(2)), style),
+                Span::styled(message, style),
+            ])
+        }
+        None if !dirty && apply_pending => {
+            let text = first_that_fits(
+                &[
+                    "Saved, not in use yet: R restarts voxtype and its OSD (quitting does too)"
+                        .to_string(),
+                    "Saved, not in use yet: R restarts voxtype and its OSD".to_string(),
+                    "Saved, not in use yet: press R".to_string(),
+                ],
+                width.saturating_sub(2),
+            );
+            Line::from(vec![
+                Span::styled("! ", theme::warn().add_modifier(Modifier::BOLD)),
+                Span::styled(text, theme::warn()),
             ])
         }
         None if dirty => {
@@ -453,8 +571,7 @@ pub fn render_status_line(
             );
             Line::from(Span::styled(text, theme::muted()))
         }
-    };
-    f.render_widget(Paragraph::new(line), area);
+    }
 }
 
 /// The first message that fits in `width` cells, or the last one cut to fit.
@@ -595,11 +712,18 @@ pub fn render_form_with_guidance(
     rows: &[FormRowSpec],
     guidance: Vec<Line<'_>>,
 ) {
+    // An app-wide notice (the last restart) outranks the section's own message.
+    let feedback = match &app.notice {
+        Some((level, message)) => Some((*level, message.as_str())),
+        None => feedback,
+    };
+    let pending = app.apply_pending.get();
+    let status_rows = status_height(area.width, dirty, pending, feedback);
     let [body, status] = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .constraints([Constraint::Min(3), Constraint::Length(status_rows)])
         .areas(area);
-    render_status_line(f, status, dirty, feedback);
+    render_status_line(f, status, dirty, pending, feedback);
 
     let (form_area, about_area) = if body.width >= SIDE_BY_SIDE_MIN_WIDTH {
         let [form, about] = Layout::default()
@@ -797,7 +921,7 @@ mod render_tests {
     fn status_text(dirty: bool, feedback: Option<(FeedbackLevel, &str)>) -> String {
         let mut terminal = Terminal::new(TestBackend::new(70, 1)).unwrap();
         terminal
-            .draw(|f| render_status_line(f, f.area(), dirty, feedback))
+            .draw(|f| render_status_line(f, f.area(), dirty, false, feedback))
             .unwrap();
         let buffer = terminal.backend().buffer().clone();
         buffer.content().iter().map(|c| c.symbol()).collect()

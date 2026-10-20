@@ -146,18 +146,16 @@ impl AdvancedState {
                 parts.push(format!("Saved to {}", ed.path().display()));
                 if promoted_hotkey_mode {
                     parts.push(
-                        "Streaming requires toggle mode: hotkey activation \
-                         auto-promoted from push_to_talk to toggle."
+                        "Streaming needs toggle mode, so the Hotkey mode is now toggle."
                             .to_string(),
                     );
                 }
                 let did_auto_switch = auto_switched_model.is_some();
                 if let Some((from, to)) = auto_switched_model {
                     parts.push(format!(
-                        "Streaming requires a model with tokenizer.model. \
-                         Switched [parakeet] model from '{from}' to '{to}'. \
-                         Press 'd' to download in the background (~2.7 GB), \
-                         any other key to skip."
+                        "Streaming needs a different Parakeet model, so the model \
+                         is now {to} (was {from}). Press d to download it in the \
+                         background (~2.7 GB); any other key skips."
                     ));
                     // Park the model name on state so the next 'd' keypress
                     // can fork the download. Any other key is treated as
@@ -495,15 +493,26 @@ pub fn handle_key(app: &mut App, key: KeyEvent) -> Action {
                 state.feedback = Some((
                     FeedbackLevel::Ok,
                     format!(
-                        "Downloading {} in the background. Watch for a desktop notification when it completes.",
+                        "Downloading {} in the background. Keep this window open until a desktop \
+                         notification says it's done, then press R to use it.",
                         model_name
                     ),
                 ));
                 return Action::None;
             }
         }
-        // Any other key dismisses the prompt and falls through to normal handling.
-        state.pending_download = None;
+        // Any other key dismisses the prompt and falls through to normal
+        // handling. Leave the exact command behind, not a stale "press d".
+        if let Some(model_name) = state.pending_download.take() {
+            state.feedback = Some((
+                FeedbackLevel::Warn,
+                format!(
+                    "Download skipped. Streaming won't work until you run \
+                     `voxtype setup --download --model {}`.",
+                    model_name
+                ),
+            ));
+        }
     }
 
     match key.code {
@@ -570,7 +579,8 @@ fn spawn_background_model_download(model_name: String) {
                 crate::notification::send_status_sync(
                     "Voxtype",
                     &format!(
-                        "Model download complete: {}. Restart voxtype to use it.",
+                        "Model download complete: {}. To use it, run \
+                         `systemctl --user restart voxtype` or press R in voxtype configure.",
                         model_name
                     ),
                     "normal",

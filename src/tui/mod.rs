@@ -131,6 +131,11 @@ fn event_loop(terminal: &mut Tui, force_package_mode: bool) -> anyhow::Result<bo
                     continue;
                 }
 
+                // A restart result stays up until the next key.
+                if !app.restart_prompt {
+                    app.notice = None;
+                }
+
                 // Global shortcuts handled before delegating to the focused pane.
                 if let Some(action) = handle_global_key(&mut app, key) {
                     match dispatch_action(terminal, &mut app, action)? {
@@ -251,13 +256,9 @@ fn run_setup_model(engine: &str, model: &str) -> Result<(), String> {
 /// model download so the changes take effect immediately. Logs the outcome
 /// to the General switch-outcome banner so the user sees it on next focus.
 fn restart_voxtype_daemon(app: &mut App) {
-    let _ = std::process::Command::new("systemctl")
-        .args(["--user", "restart", "voxtype"])
-        .status();
-    // The freshly (re)started daemon has read the config as it stands now,
-    // so quitting doesn't need another restart unless a later save lands.
-    app.config_synced_mtime = app::config_file_mtime();
-    app.refresh_inventory();
+    // On success the daemon has read the config as it stands now, so
+    // quitting doesn't need another restart unless a later save lands.
+    app.restart_daemon();
 }
 
 /// Restart the daemon on the way out of the TUI when a save landed after
@@ -312,6 +313,18 @@ fn handle_quit_prompt_key(app: &mut App, key: KeyEvent) -> Action {
     }
 }
 
+/// Keys while the restart confirmation is open: Enter or `y` restarts,
+/// anything else cancels.
+fn handle_restart_prompt_key(app: &mut App, key: KeyEvent) {
+    app.restart_prompt = false;
+    if matches!(
+        key.code,
+        KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Char('R')
+    ) {
+        app.restart_daemon();
+    }
+}
+
 /// Keys while the help overlay is open: arrows and paging scroll it, any
 /// other key closes it.
 fn handle_help_key(app: &mut App, key: KeyEvent) {
@@ -340,6 +353,11 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> Option<Action> {
         return Some(handle_quit_prompt_key(app, key));
     }
 
+    if app.restart_prompt {
+        handle_restart_prompt_key(app, key);
+        return Some(Action::None);
+    }
+
     if app.help_open {
         handle_help_key(app, key);
         return Some(Action::None);
@@ -347,6 +365,12 @@ fn handle_global_key(app: &mut App, key: KeyEvent) -> Option<Action> {
     if matches!(key.code, KeyCode::Char('?')) {
         app.help_open = true;
         app.help_scroll.set(0);
+        return Some(Action::None);
+    }
+    // Saved settings reach the daemon and its OSD only when voxtype
+    // restarts; R does that from anywhere, after a confirmation.
+    if matches!(key.code, KeyCode::Char('R')) {
+        app.restart_prompt = true;
         return Some(Action::None);
     }
 
@@ -452,7 +476,7 @@ fn screen_layout(area: Rect, app: &App) -> ScreenLayout {
 
 fn handle_mouse(app: &mut App, mouse: MouseEvent, screen: Rect) {
     // Ignore mouse input while an overlay is open or a text field is editing.
-    if app.help_open || app.quit_pending || app.is_editing() {
+    if app.help_open || app.quit_pending || app.restart_prompt || app.is_editing() {
         return;
     }
     if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
@@ -513,9 +537,10 @@ fn draw(f: &mut Frame, app: &App) {
         chrome::render_too_small(f, area);
         return;
     }
+    app.apply_pending.set(app.restart_pending());
     let layout = screen_layout(area, app);
 
-    chrome::render_header(f, layout.header);
+    chrome::render_header(f, layout.header, app);
     if app.variant_mismatch.is_some() {
         chrome::render_variant_mismatch_banner(f, layout.banner, app);
     }
@@ -528,6 +553,9 @@ fn draw(f: &mut Frame, app: &App) {
     }
     if app.quit_pending {
         chrome::render_quit_prompt(f, app);
+    }
+    if app.restart_prompt {
+        chrome::render_restart_prompt(f, app);
     }
 }
 
