@@ -1,0 +1,171 @@
+# /usr/bin/voxtype dispatches to one variant in /usr/lib/voxtype. Like
+# voxtype-bin, the package does not own it: `voxtype setup gpu|onnx` rewrites
+# it, and an upgrade keeps whatever was selected.
+#
+# First install picks, in order:
+#   ONNX engine configured (or no user config yet):
+#     CUDA 13 variant      if it was built, an NVIDIA GPU is present and
+#                          libcudart.so.13 is installed
+#     ONNX CPU variant     otherwise (MIGraphX is never picked here: on an
+#                          iGPU it is opt-in, see the README)
+#   Whisper configured:
+#     Vulkan variant       if a Vulkan driver and a GPU render node exist
+#     native CPU variant   otherwise
+
+_lib=/usr/lib/voxtype
+_saved=/tmp/.voxtype-crmne-git-backend
+_onnx_engines=" parakeet moonshine sensevoice paraformer dolphin omnilingual cohere "
+
+_resolve_active_binary() {
+    if [ -L /usr/bin/voxtype ]; then
+        readlink -f /usr/bin/voxtype
+    elif [ -f /usr/bin/voxtype ]; then
+        sed -n 's/^exec \([^ ]*\).*/\1/p' /usr/bin/voxtype | head -1
+    fi
+}
+
+# Same shapes `voxtype setup` writes: a wrapper that execs the real path
+# for variants whose ONNX Runtime providers resolve from argv[0], a symlink
+# for everything else (load-dynamic finds onnx-cpu/'s libonnxruntime.so via
+# /proc/self/exe, so a symlink is enough there).
+_install_active_binary() {
+    local target
+    target=$(readlink -f "$1")
+    rm -f /usr/bin/voxtype
+    case "$target" in
+        "$_lib"/cuda-12/*|"$_lib"/cuda-13/*)
+            printf '#!/bin/sh\n# voxtype dispatch wrapper. Managed by `voxtype setup` and the\n# voxtype-crmne-git install script; do not edit by hand.\nexec %s "$@"\n' \
+                "$target" > /usr/bin/voxtype
+            chmod 755 /usr/bin/voxtype
+            ;;
+        "$_lib"/migraphx/*)
+            # MIGraphX needs a writable cache for compiled graphs, the same
+            # default `voxtype setup onnx` writes.
+            printf '#!/bin/sh\n# voxtype dispatch wrapper. Managed by `voxtype setup` and the\n# voxtype-crmne-git install script; do not edit by hand.\n: "${ORT_MIGRAPHX_MODEL_CACHE_PATH:=${XDG_CACHE_HOME:-$HOME/.cache}/voxtype/migraphx}"\nmkdir -p "$ORT_MIGRAPHX_MODEL_CACHE_PATH"\nexport ORT_MIGRAPHX_MODEL_CACHE_PATH\nexec %s "$@"\n' \
+                "$target" > /usr/bin/voxtype
+            chmod 755 /usr/bin/voxtype
+            ;;
+        *)
+            ln -sf "$target" /usr/bin/voxtype
+            ;;
+    esac
+}
+
+_has_cuda13() {
+    /sbin/ldconfig -p 2>/dev/null | grep -q '\blibcudart\.so\.13\b' ||
+        [ -e /opt/cuda/lib64/libcudart.so.13 ] || [ -e /opt/cuda/targets/x86_64-linux/lib/libcudart.so.13 ]
+}
+
+_has_nvidia_gpu() {
+    [ -e /proc/driver/nvidia/version ] && return 0
+    grep -qs '^0x10de$' /sys/class/drm/card*/device/vendor
+}
+
+_has_vulkan_gpu() {
+    local f
+    ls /dev/dri/renderD* >/dev/null 2>&1 || return 1
+    for f in /usr/share/vulkan/icd.d/*.json /etc/vulkan/icd.d/*.json; do
+        [ -e "$f" ] && return 0
+    done
+    return 1
+}
+
+# Print the engine each user's config selects ("whisper" when a config
+# leaves it unset); print nothing when no user has a config yet. pacman
+# runs this as root, so look at every home directory.
+_configured_engines() {
+    local cfg
+    for cfg in /home/*/.config/voxtype/config.toml /root/.config/voxtype/config.toml; do
+        [ -f "$cfg" ] || continue
+        awk '
+            /^[[:space:]]*\[/ { exit }
+            /^[[:space:]]*engine[[:space:]]*=/ {
+                v = $0; sub(/^[^=]*=[[:space:]]*/, "", v); sub(/[[:space:]]*#.*/, "", v)
+                gsub(/"|\047/, "", v); print v; found = 1; exit
+            }
+            END { if (!found) print "whisper" }
+        ' "$cfg"
+    done
+}
+
+_wants_onnx() {
+    local engines e
+    engines=$(_configured_engines)
+    # No user config yet: Carmine's chezmoi config selects Parakeet.
+    [ -z "$engines" ] && return 0
+    for e in $engines; do
+        case "$_onnx_engines" in *" $e "*) return 0 ;; esac
+    done
+    return 1
+}
+
+_onnx_cpu_variant() {
+    local v
+    for v in "$_lib"/onnx-cpu/voxtype-onnx-avx512 "$_lib"/onnx-cpu/voxtype-onnx-avx2; do
+        [ -x "$v" ] && { echo "$v"; return; }
+    done
+}
+
+_default_backend() {
+    if _wants_onnx; then
+        if [ -x "$_lib/cuda-13/voxtype-onnx-cuda-13" ] && _has_nvidia_gpu && _has_cuda13; then
+            echo "$_lib/cuda-13/voxtype-onnx-cuda-13"
+            return
+        fi
+        local cpu
+        cpu=$(_onnx_cpu_variant)
+        if [ -n "$cpu" ]; then
+            echo "$cpu"
+            return
+        fi
+    fi
+    if _has_vulkan_gpu; then
+        echo "$_lib/voxtype-vulkan"
+    else
+        echo "$_lib/voxtype-native"
+    fi
+}
+
+_select_backend() {
+    local target=""
+    if [ -f "$_saved" ]; then
+        target=$(cat "$_saved")
+        rm -f "$_saved"
+    fi
+    case "$target" in
+        "$_lib"/*) [ -x "$target" ] || target="" ;;
+        *) target="" ;;
+    esac
+    [ -n "$target" ] || target=$(_default_backend)
+    if [ -x "$_lib/cuda-13/voxtype-onnx-cuda-13" ]; then
+        ln -sfn cuda-13/voxtype-onnx-cuda-13 "$_lib/voxtype-onnx-cuda"
+    else
+        rm -f "$_lib/voxtype-onnx-cuda"
+    fi
+    _install_active_binary "$target"
+    echo "    /usr/bin/voxtype -> $(_resolve_active_binary)"
+}
+
+post_install() {
+    echo "==> voxtype-crmne-git ${1%%-*}"
+    echo "    Variants: $(cd "$_lib" && ls -d voxtype-native voxtype-vulkan onnx-cpu/* cuda-13/voxtype-* migraphx/voxtype-* 2>/dev/null | grep -v '\.so' | tr '\n' ' ')"
+    _select_backend
+    echo "    Switch variants with: sudo voxtype setup gpu --enable|--disable"
+    echo "                          sudo voxtype setup onnx --enable|--disable"
+    echo "    Restart the daemon when it is idle: systemctl --user restart voxtype"
+}
+
+pre_upgrade() {
+    _resolve_active_binary > "$_saved" 2>/dev/null || true
+}
+
+post_upgrade() {
+    post_install "$1"
+}
+
+post_remove() {
+    case "$(_resolve_active_binary)" in
+        "$_lib"/*|"") rm -f /usr/bin/voxtype ;;
+    esac
+    rm -f "$_lib/voxtype-onnx-cuda"
+}

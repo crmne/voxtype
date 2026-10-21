@@ -1,0 +1,7 @@
+# makepkg outputs
+/src/
+/pkg/
+/voxtype/
+*.tgz
+*.pkg.tar.zst
+*.log
