@@ -289,6 +289,7 @@ fn first_time(key: &str) -> bool {
 pub async fn notify_delivered(
     report: &OutputReport,
     text: &str,
+    original: Option<&str>,
     notification: &NotificationConfig,
     engine: TranscriptionEngine,
 ) {
@@ -311,6 +312,7 @@ pub async fn notify_delivered(
     if notification.on_transcription {
         super::send_transcription_notification_titled(
             text,
+            original,
             notification.show_engine_icon,
             engine,
             &notification.urgency,

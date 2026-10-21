@@ -184,7 +184,7 @@ pub fn feature_compiled(feature: &str) -> bool {
         "paraformer" => cfg!(feature = "paraformer"),
         "dolphin" => cfg!(feature = "dolphin"),
         "omnilingual" => cfg!(feature = "omnilingual"),
-        "cohere" => cfg!(feature = "cohere"),
+        "cohere" => cfg!(any(feature = "cohere", feature = "cohere-gguf")),
         "openvino" => cfg!(feature = "openvino-whisper"),
         _ => false,
     }
@@ -638,7 +638,7 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::DynamicEnum { source: "models" },
         "Engine",
         "Model",
-        "Cohere Transcribe model variant (quantization level).",
+        "Cohere ONNX model variant or path to a transcribe.cpp GGUF file.",
     )
     .for_onnx_engine("cohere"),
     spec(
@@ -658,7 +658,37 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         KeyType::Int { min: 1, max: 256 },
         "Engine",
         "Threads",
-        "ONNX Runtime intra-op threads. Unset lets voxtype pick.",
+        "Inference threads. Unset lets the runtime pick.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.gguf_backend",
+        "cohere",
+        "gguf_backend",
+        closed(&["auto", "cpu", "cpu_accel", "vulkan", "metal", "cuda", "rocm"]),
+        "Engine",
+        "GGUF backend",
+        "Compute backend for transcribe.cpp GGUF inference.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.max_chunk_secs",
+        "cohere",
+        "max_chunk_secs",
+        KeyType::Int { min: 5, max: 35 },
+        "Engine",
+        "Max chunk duration",
+        "Maximum seconds per Cohere inference; longer recordings split near quiet boundaries.",
+    )
+    .for_onnx_engine("cohere"),
+    spec(
+        "cohere.boundary_search_secs",
+        "cohere",
+        "boundary_search_secs",
+        KeyType::Float { min: 0.0, max: 5.0 },
+        "Engine",
+        "Boundary search",
+        "Seconds around each balanced split to search for a quiet boundary.",
     )
     .for_onnx_engine("cohere"),
     spec(
@@ -1101,6 +1131,33 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Remove \"uh\", \"um\" and the rest of text.filler_words from the output.",
     ),
     spec(
+        "text.collapse_restarts",
+        "text",
+        "collapse_restarts",
+        KeyType::Bool,
+        "Text",
+        "Collapse restarts and stutters",
+        "Remove self-corrections where a phrase is restarted by repeating a word, plus stutters and \"scratch that\" retractions.",
+    ),
+    spec(
+        "text.repair_sentence_breaks",
+        "text",
+        "repair_sentence_breaks",
+        KeyType::Bool,
+        "Text",
+        "Repair sentence breaks",
+        "Join fragments split off by a premature sentence boundary and add question marks to interrogatives.",
+    ),
+    spec(
+        "text.format_numbers",
+        "text",
+        "format_numbers",
+        KeyType::Bool,
+        "Text",
+        "Format dictated numbers",
+        "Convert spoken quantities to written form (\"twenty five dollars\" -> \"$25\"). Prose-heavy words like \"one\" and \"first\" are left alone.",
+    ),
+    spec(
         "text.replacements.<from>",
         REPLACEMENTS_TABLE,
         "<from>",
@@ -1210,6 +1267,15 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
         "Notifications",
         "Notify when no speech is heard",
         "Post a notification when voice activity detection finds no speech and the recording is discarded.",
+    ),
+    spec(
+        "output.notification.show_edits",
+        "output.notification",
+        "show_edits",
+        KeyType::Bool,
+        "Notifications",
+        "Show cleanup edits",
+        "When cleanup or post-processing changed the text, show the edits as a word diff in the transcription notification instead of a plain preview.",
     ),
     spec(
         "output.notification.show_engine_icon",
@@ -1519,6 +1585,31 @@ pub const CONFIG_KEYS: &[KeySpec] = &[
          login and lands on CPU.",
     )
     .for_engine("whisper"),
+    spec(
+        "parakeet.max_window_secs",
+        "parakeet",
+        "max_window_secs",
+        KeyType::Float { min: 0.0, max: 3600.0 },
+        "Advanced",
+        "Max audio per pass",
+        "Longest stretch of audio sent to the model at once. Longer recordings are \
+         split into overlapping windows, because the TDT exports abort rather than \
+         degrade past their fixed attention size. 0 disables windowing.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
+    spec(
+        "parakeet.window_overlap_secs",
+        "parakeet",
+        "window_overlap_secs",
+        KeyType::Float { min: 0.0, max: 60.0 },
+        "Advanced",
+        "Window overlap",
+        "Audio shared between consecutive windows, used to find where two passes \
+         agree so the join is not duplicated or cut short.",
+    )
+    .for_engine("parakeet")
+    .gated("parakeet"),
     spec(
         "parakeet.streaming",
         "parakeet",
@@ -2465,6 +2556,8 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "whisper.gpu_wait_secs" => json!(cfg.whisper.gpu_wait_secs),
 
         "parakeet.model" => json!(pk().model),
+        "parakeet.max_window_secs" => json!(pk().max_window_secs),
+        "parakeet.window_overlap_secs" => json!(pk().window_overlap_secs),
         "parakeet.model_type" => match pk().model_type {
             Some(t) => serde_json::to_value(t).ok()?,
             None => Json::Null,
@@ -2516,6 +2609,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
             Some(n) => json!(n),
             None => Json::Null,
         },
+        "cohere.gguf_backend" => json!(co().gguf_backend),
+        "cohere.max_chunk_secs" => json!(co().max_chunk_secs),
+        "cohere.boundary_search_secs" => json!(co().boundary_search_secs),
         "cohere.on_demand_loading" => json!(co().on_demand_loading),
 
         "openvino.model" => json!(ov().model),
@@ -2580,6 +2676,9 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         "text.spoken_punctuation" => json!(cfg.text.spoken_punctuation),
         "text.smart_auto_submit" => json!(cfg.text.smart_auto_submit),
         "text.filter_filler_words" => json!(cfg.text.filter_filler_words),
+        "text.collapse_restarts" => json!(cfg.text.collapse_restarts),
+        "text.repair_sentence_breaks" => json!(cfg.text.repair_sentence_breaks),
+        "text.format_numbers" => json!(cfg.text.format_numbers),
         "text.replacements.<from>" => {
             let map: Map<String, Json> = cfg
                 .text
@@ -2607,6 +2706,7 @@ pub fn resolve(key: &str, cfg: &Config) -> Option<Json> {
         }
         "output.notification.on_transcription" => json!(cfg.output.notification.on_transcription),
         "output.notification.on_no_speech" => json!(cfg.output.notification.on_no_speech),
+        "output.notification.show_edits" => json!(cfg.output.notification.show_edits),
         "output.notification.show_engine_icon" => json!(cfg.output.notification.show_engine_icon),
 
         "osd.enabled" => json!(cfg.osd.enabled),

@@ -112,7 +112,7 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 - `SCROLLLOCK` - Scroll Lock key (recommended)
 - `PAUSE` - Pause/Break key
 - `RIGHTALT` - Right Alt key
-- `F13` through `F24` - Extended function keys
+- `F13` through `F24` - Extended function keys (on macOS, `F13`–`F20` are supported; `F21`–`F24` are Linux-only; PC keyboards' PrintScreen/ScrollLock/Pause keys arrive as `F13`/`F14`/`F15`, so both F-key names and `PRINTSCREEN`/`SCROLLLOCK`/`PAUSE` work for them)
 - `MEDIA` - Media key (often a dedicated button on multimedia keyboards)
 - `RECORD` - Record key
 - `INSERT` - Insert key
@@ -128,6 +128,25 @@ The main key to hold for recording. Must be a valid Linux evdev key name.
 [hotkey]
 key = "PAUSE"
 ```
+
+**Mouse buttons:**
+
+The spare buttons on a mouse are ordinary evdev keycodes and can be used as the hotkey:
+
+- `BTN_SIDE` - the rear thumb button on most mice
+- `BTN_EXTRA` - the forward thumb button
+- `BTN_FORWARD`, `BTN_BACK` - navigation buttons where the mouse reports them separately
+- `BTN_TASK` - present on some multi-button mice
+- `BTN_MIDDLE` - the scroll wheel click
+
+```toml
+[hotkey]
+key = "BTN_SIDE"
+```
+
+The `BTN_` prefix is optional, so `side` and `btn-extra` also work. Primary and secondary click (`BTN_LEFT`, `BTN_RIGHT`) are not accepted: binding push-to-talk to them makes the desktop unusable.
+
+Voxtype opens the mouse's event device automatically when the hotkey is a button, so no extra configuration is needed. Your user still needs to be in the `input` group, the same as for keyboard hotkeys. Run `evtest` to confirm which button your mouse reports; some mice send a keyboard keycode from a second interface rather than a `BTN_` event, in which case use that key name instead.
 
 **Numeric keycodes:**
 
@@ -1352,6 +1371,26 @@ model = "parakeet-tdt-0.6b-v3"
 on_demand_loading = true  # Free memory when not transcribing
 ```
 
+### max_window_secs
+
+**Type:** Float
+**Default:** `240`
+**Required:** No
+
+Longest stretch of audio sent to the model in one pass. Longer recordings are split into overlapping windows and the transcripts are stitched back together.
+
+The TDT ONNX exports carry a fixed-size attention bias, and exceeding it does not degrade gracefully: ONNX Runtime aborts the run with `Attempting to broadcast an axis by a dimension other than 1` and the whole transcription is lost. An 11-minute file produced 8691 encoder frames against a bias sized for 3691, which is roughly 295 seconds at the 80ms frame rate these models use. The default of 240 stays under that with margin while leaving ordinary dictation in one piece.
+
+Set to `0` to send the whole buffer in one pass.
+
+### window_overlap_secs
+
+**Type:** Float
+**Default:** `5`
+**Required:** No
+
+Audio shared between consecutive windows. The stitcher uses the shared region to find where two passes agree, so it needs to be long enough to contain several words. If the two passes disagree there, voxtype concatenates rather than guessing at a join, which can repeat a few words but never drops speech.
+
 ### streaming
 
 **Type:** Boolean
@@ -1363,6 +1402,12 @@ instead of waiting for hotkey release. Uses the parakeet-rs cache-aware
 streaming pipeline and a TDT v3 family model with `tokenizer.model` — a
 different mechanism from the shared `[streaming]` section used by
 `[whisper] streaming` and `[openvino] streaming`, and not configured by it.
+
+**Disables `post_process`.** The `post_process` command operates on a
+finished transcript, which streaming never produces, so it is inactive while
+streaming and the daemon warns at startup if it is configured. `[text]`
+processing (replacements, spoken punctuation, filler filtering) IS applied:
+each streaming segment is processed as it is committed.
 
 **Requires toggle activation.** Streaming output types characters at the
 cursor while you dictate. On Wayland compositors backed by libinput
@@ -1495,10 +1540,10 @@ Cohere Transcribe is an encoder-decoder ASR model from Cohere Labs. It currently
 ### model
 
 **Type:** String
-**Default:** `"cohere-transcribe-int8"`
+**Default:** `"cohere-transcribe-q4f16"`
 **Required:** No
 
-The Cohere model to use. Can be a model name (looked up in `~/.local/share/voxtype/models/<name>/`) or an absolute path to a model directory.
+The Cohere model to use. ONNX models use a model name (looked up in `~/.local/share/voxtype/models/<name>/`) or a directory path. GGUF models use a `.gguf` file path, including `cohere-transcribe-03-2026-Q4_K_M.gguf`.
 
 **Available models:**
 
@@ -1507,9 +1552,11 @@ The Cohere model to use. Can be a model name (looked up in `~/.local/share/voxty
 | `cohere-transcribe-q4f16` | int4 weights, FP16 KV | ~1.5 GB | Recommended; smallest download, fastest CPU |
 | `cohere-transcribe-q4` | int4 weights, FP32 KV | ~2.0 GB | Same accuracy as q4f16, larger memory |
 | `cohere-transcribe-int8` | int8 | ~2.9 GB | Quality reference for quantized models |
-| `cohere-transcribe-fp16` | FP16 | ~3.9 GB | Highest accuracy, largest download |
+| `cohere-transcribe-fp16` | FP16 | ~3.9 GB | Highest accuracy, largest ONNX download |
+| `cohere-transcribe-03-2026-Q4_K_M.gguf` | Q4_K_M GGUF | 1.56 GB | transcribe.cpp, tested on Intel Vulkan |
+| `cohere-transcribe-03-2026-Q8_0.gguf` | Q8_0 GGUF | 2.41 GB | transcribe.cpp reference quantization |
 
-All variants are HuggingFace Optimum exports of Cohere Transcribe (16384 vocab, 14 languages). Download via `voxtype setup model` (interactive) — pick the Cohere section and confirm the size warning.
+The first four variants are HuggingFace Optimum ONNX exports. The GGUF variants are published for transcribe.cpp by handy-computer. Download either format via `voxtype setup model` (interactive), or pass its exact name to `voxtype setup --download --model <name>`. Setup verifies GGUF downloads against the publisher's SHA-256 before installing them.
 
 **Performance (warm CPU, voxtype 0.7.0, dictation-length audio):**
 
@@ -1555,6 +1602,20 @@ language = "fr"
 
 The daemon resolves the language to its decoder prefix at startup. Unsupported codes are rejected with a clear error.
 
+### max_chunk_secs and boundary_search_secs
+
+**Defaults:** `35` seconds and `2.5` seconds, respectively.
+
+Cohere recordings longer than `max_chunk_secs` are divided into balanced segments before inference. Voxtype searches up to `boundary_search_secs` on either side of each target split for the quietest 100 ms of audio. Every sample is included once; adjacent segments do not overlap. This applies to both ONNX and GGUF Cohere models, including meeting audio passed to the engine. The model's official processor also chunks long recordings; keeping each inference at 35 seconds or less helps avoid long-form quality loss. Quiet-boundary splitting can still cut through speech when no silence is present.
+
+`max_chunk_secs` accepts 5–35; `boundary_search_secs` accepts 0–5. Set the search to `0` for exact balanced splits. Shorter chunks can improve long-form accuracy but increase processing time, especially with GGUF's current per-chunk CLI startup.
+
+```toml
+[cohere]
+max_chunk_secs = 30
+boundary_search_secs = 2.5
+```
+
 ### threads
 
 **Type:** Integer (optional)
@@ -1590,6 +1651,9 @@ on_demand_loading = true
 | `model` | `--model` | `VOXTYPE_MODEL` | `"cohere-transcribe-q4f16"` | Cohere model name or path |
 | `language` | `--language` | `VOXTYPE_LANGUAGE` | `"en"` | One of the 14 supported language codes |
 | `threads` | - | - | auto | ONNX intra-op thread count |
+| `gguf_backend` | - | - | `"auto"` | transcribe.cpp backend for GGUF models |
+| `max_chunk_secs` | - | - | `35` | Maximum seconds per Cohere inference |
+| `boundary_search_secs` | - | - | `2.5` | Quiet-boundary search radius in seconds |
 | `on_demand_loading` | - | - | `false` | Load model only when recording starts |
 
 ### Complete Example
@@ -1614,6 +1678,29 @@ cargo build --release --features cohere-tensorrt  # NVIDIA + TensorRT EP
 ```
 
 The prebuilt `voxtype-*-onnx-*` release binaries already include `cohere`, so users installing via AUR/.deb/.rpm don't need to rebuild.
+
+### GGUF with Vulkan
+
+GGUF models use [transcribe.cpp](https://github.com/handy-computer/transcribe.cpp) in the Voxtype daemon through its Rust binding. The model and session remain loaded across recordings when `on_demand_loading = false`. This is the same `cohere` engine in Voxtype, with a different inference runtime selected by the `.gguf` extension. The ONNX model directory and GGUF file are distinct formats.
+
+Build Voxtype with `--features gpu-vulkan`, then run `voxtype setup model` and choose a Cohere GGUF variant. To download without activating it:
+
+```sh
+voxtype setup --download --model cohere-transcribe-03-2026-Q4_K_M.gguf
+```
+
+To activate it explicitly, set:
+
+```toml
+engine = "cohere"
+
+[cohere]
+model = "cohere-transcribe-03-2026-Q4_K_M.gguf"
+gguf_backend = "vulkan"
+language = "en"
+```
+
+`gguf_backend = "vulkan"` requires a hardware Vulkan device and reports an error if none is selected; `"auto"` lets transcribe.cpp select the backend. `--features cohere-gguf` alone builds the CPU runtime; `--features cohere` also includes GGUF support. The Rust dependency builds transcribe.cpp from source and needs CMake and a C++ compiler; Vulkan builds also need Vulkan and SPIR-V headers plus `glslc`. Setup downloads Q4_K_M and Q8_0 from a pinned revision of the [official transcribe.cpp Cohere GGUF repository](https://huggingface.co/handy-computer/cohere-transcribe-03-2026-gguf); the other published quantizations remain usable by absolute path.
 
 ---
 
@@ -1685,6 +1772,10 @@ language_hints_strict = false   # allow occasional third-language tokens
 **Type:** Boolean
 **Default:** `true`
 **Required:** No
+
+> While streaming, `[output.post_process]` does not run, because it operates
+> on a completed transcript. Set `async_api = true` or `streaming = false` if
+> you rely on it. `[text]` processing is applied to each committed segment.
 
 Activation mode for the Soniox backend:
 
@@ -2500,6 +2591,19 @@ When `true`, shows a notification when voice activity detection finds no speech 
 
 If you see this notification while you were speaking, your microphone level is probably too low. Raise the input volume, or lower `[vad] threshold`.
 
+### show_edits
+
+**Type:** Boolean
+**Default:** `true`
+**Required:** No
+
+When `[text]` cleanup or `[output.post_process]` changed the transcription, the transcription notification shows what changed: deletions struck through and replacements highlighted, with an "✎ N edits" title. Set it to `false` to get the plain text preview instead. An LLM `post_process` command that rewrites whole sentences produces a long diff, and this is the switch for that.
+
+```toml
+[output.notification]
+show_edits = false
+```
+
 ### urgency
 
 **Type:** String (`"low"`, `"normal"`, or `"critical"`)
@@ -2711,6 +2815,12 @@ See [User Manual - Output Hooks](USER_MANUAL.md#output-hooks-compositor-integrat
 
 Optional post-processing command that runs after transcription. The command receives
 the transcribed text on stdin and should output the processed text on stdout.
+
+> **Not applied when streaming is enabled.** The command is deliberately
+> bypassed on the streaming path: it would see only the newest fragment rather
+> than the transcript visible at the cursor, and rewriting fragments in
+> isolation produces incoherent output. The daemon warns at startup when
+> streaming is on and this is configured. See also [`[text]`](#text).
 
 **Best use cases:**
 - **Translation**: Speak in one language, output in another
@@ -2936,6 +3046,15 @@ post_process_timeout_ms = 60000
 
 Controls text post-processing after transcription.
 
+> **Applied per committed segment when streaming is enabled.** Streaming types
+> text at the cursor as it is decoded; `spoken_punctuation`, `replacements`,
+> and `filter_filler_words` run on each segment as it is committed rather than
+> on partial (still-revisable) text. A rule whose match spans a segment
+> boundary only takes effect in file-output mode (`--file`), where the whole
+> transcript is processed once at the end.
+> [`[output.post_process]`](#outputpost_process) remains inactive while
+> streaming; the daemon warns at startup if it is configured.
+
 ### spoken_punctuation
 
 **Type:** Boolean
@@ -3054,6 +3173,87 @@ VOXTYPE_SMART_AUTO_SUBMIT=true voxtype
 
 **Note:** `smart_auto_submit` is conditional - it only fires when you say "submit". The existing `auto_submit` option always presses Enter after every transcription. Use `smart_auto_submit` when you want the choice per dictation, and `auto_submit` when you always want Enter pressed.
 
+### repair_sentence_breaks
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Repairs sentence boundaries the engine placed at a pause rather than at the end of a thought. Two rules that only work together:
+
+- **Joining a premature break.** An engine capitalises after a boundary it believes in, so a terminator followed by a *lower-case* word is the engine contradicting itself. That fragment is rejoined.
+- **Restoring the question mark.** A sentence is treated as a question when it opens with a wh-word or an auxiliary *and* inverts subject and auxiliary.
+
+```text
+what are the other phases? we have here.
+  -> what are the other phases we have here?
+```
+
+The inversion test is what keeps it safe. "How might we ship this." becomes a question; "What we need is a switch.", "How to install this." and "What a mess." are left alone, because none of them inverts. Joining skips abbreviations (`e.g.`, `p.m.`), decimals (`3.30`), and lower-case proper nouns (`iPhone`).
+
+This is a heuristic standing in for a punctuation model, so it is deliberately narrow and off by default.
+
+**Example:**
+
+```toml
+[text]
+repair_sentence_breaks = true
+```
+
+### format_numbers
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Converts dictated quantities into written form - inverse text normalization.
+
+- "it will cost twenty five dollars a month" becomes "it will cost $25 a month"
+- "Twenty-five dollars a month." becomes "$25 a month."
+- "meet me at three thirty p m" becomes "meet me at 3:30 p.m."
+
+**Why it is conservative:** English number words are also ordinary words, and a general-purpose converter mangles prose - "one of the things we need" becomes "1 of the things we need", "no one knows" becomes "no 1 knows", "the first thing" becomes "the 1st thing". Voxtype therefore only hands a sentence to the converter when it looks like it is about a quantity (a currency word, a time marker, a unit, or a compound number such as "twenty five"), and then rejects any individual rewrite that would turn a lone number word into a digit. Sentences with no quantity in them are never touched at all.
+
+That also means it does less than you might expect on engines that already normalize numbers themselves. Parakeet, for example, emits "22 open issues" as digits without help, so there is nothing left to convert.
+
+Every release build includes it. If you build voxtype yourself with `--no-default-features`, add `--features itn` back; a build without it ignores `format_numbers` and logs a warning at startup.
+
+**Example:**
+
+```toml
+[text]
+format_numbers = true
+```
+
+Runs after disfluency cleanup and spoken punctuation, and before your `replacements`, so your own rules still get the last word.
+
+### collapse_restarts
+
+**Type:** Boolean
+**Default:** `false`
+**Required:** No
+
+Removes restart disfluencies: the pattern where you interrupt yourself and start the phrase again by repeating a word you already said. Speech engines usually put a sentence boundary at the point where you paused, which is the signal this uses.
+
+It handles three shapes:
+
+- **Repeat-anchored restarts.** "both the admin tool and the independent tool. the independent booking migration tool" becomes "both the admin tool and the independent booking migration tool".
+- **Stutters.** "so the the the point is" becomes "so the point is".
+- **Explicit retractions.** "it is not just a glitch. I'm sorry, it's not by design" becomes "it's not by design". Recognised phrases are "scratch that", "strike that", "I'm sorry", "I mean", "I meant to say" and "or rather".
+
+Singular/plural restarts are matched too, and the repaired word inherits the capitalisation of the word it replaced, so "consent line. Lines, so" becomes "consent lines, so" rather than leaving a stray capital mid-sentence.
+
+**Why it is off by default:** a false positive silently deletes words you actually said, which is worse than leaving a disfluency in place. The rules are deliberately conservative - a repeat has to carry a content word, the deleted span has to be short, and repeats of common function words or short names ("Send it to Bob. Bob will know.") are left alone - but the trade-off is a decision for you rather than a default.
+
+**Example:**
+
+```toml
+[text]
+collapse_restarts = true
+```
+
+This runs after filler-word filtering and after spoken-punctuation conversion - it keys on sentence boundaries, so a dictated "period" has to have become a real `.` first - and before the final `replacements` pass, so your own rules still get the last word on the text.
+
 ### filter_filler_words
 
 **Type:** Boolean
@@ -3074,6 +3274,9 @@ With this enabled:
 - "Well, um, I think" becomes "Well, I think"
 - "uh hello world" becomes "hello world"
 - "hello world, uh." becomes "hello world."
+- "uhhhh hello world" becomes "hello world"
+
+Held fillers match too: only the final sound is allowed to repeat, so "uhhhh", "ummm" and "hmmm" are all removed while "umbrella", "summer" and "ahead" are untouched. The one exception is `er`, which keeps matching exactly so the verb "err" survives.
 
 **CLI flag:**
 

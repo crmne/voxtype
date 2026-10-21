@@ -151,8 +151,19 @@ fn write_state_file(path: &PathBuf, state: &str) {
         }
     }
 
-    if let Err(e) = std::fs::write(path, state) {
+    // Write to a sibling and rename, rather than writing in place.
+    // std::fs::write truncates before it writes, so a reader polling this
+    // file - waybar runs `voxtype status --follow` against it - can catch the
+    // empty window and read "" as the state. rename(2) is atomic within a
+    // filesystem, so a reader sees either the old contents or the new.
+    let tmp = path.with_extension(format!("tmp.{}", std::process::id()));
+    if let Err(e) = std::fs::write(&tmp, state) {
         tracing::warn!("Failed to write state file: {}", e);
+        return;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        tracing::warn!("Failed to replace state file: {}", e);
+        let _ = std::fs::remove_file(&tmp);
     } else {
         tracing::trace!("State file updated: {}", state);
     }
@@ -1195,6 +1206,21 @@ impl Daemon {
             tracing::info!(
                 "Word replacements configured: {} rules",
                 config.text.replacements.len()
+            );
+        }
+
+        if config.streaming_enabled() && config.output.post_process.is_some() {
+            // [text] rules no longer belong in this warning: since the #669
+            // fix they are applied when a streaming segment is committed, and
+            // warning that a working setting is ignored is worse than not
+            // warning at all. The LLM post_process hook is the one completed-
+            // transcript stage streaming still skips (see the note in
+            // output::streaming): incremental output would re-run it per
+            // segment and let it rewrite already-typed text.
+            tracing::warn!(
+                "Streaming is enabled, so output.post_process will NOT run. \
+                 The post-process command needs a completed transcript, which \
+                 streaming never produces. Disable streaming to use it."
             );
         }
 
@@ -3936,6 +3962,11 @@ impl Daemon {
                         output::fallback::notify_delivered(
                             &report,
                             &final_text,
+                            self.config
+                                .output
+                                .notification
+                                .show_edits
+                                .then_some(text.as_str()),
                             &self.config.output.notification,
                             self.config.engine,
                         )

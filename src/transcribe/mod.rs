@@ -22,6 +22,9 @@ pub mod soniox;
 pub mod streaming;
 pub mod subprocess;
 pub mod whisper;
+/// Long-audio windowing shared by the engines with a bounded input length.
+/// Deliberately not feature-gated: see the module docs.
+pub mod window;
 pub mod worker;
 
 pub use sliding_window::{SlidingWindowConfig, SlidingWindowStreamingTranscriber};
@@ -72,6 +75,12 @@ pub mod omnilingual;
 /// Cohere Transcribe backend (ONNX-based encoder-decoder ASR).
 #[cfg(feature = "cohere")]
 pub mod cohere;
+
+#[cfg(feature = "cohere-gguf")]
+pub mod cohere_gguf;
+
+#[cfg(any(feature = "cohere", feature = "cohere-gguf"))]
+mod cohere_chunking;
 
 /// Cohere-specific log-mel feature extractor (NeMo conventions, 128 mels).
 #[cfg(feature = "cohere")]
@@ -280,20 +289,23 @@ pub fn create_transcriber(config: &Config) -> Result<Box<dyn Transcriber>, Trans
             "Omnilingual engine requested but voxtype was not compiled with --features omnilingual"
                 .to_string(),
         )),
-        #[cfg(feature = "cohere")]
         TranscriptionEngine::Cohere => {
             let cfg = config.cohere.as_ref().ok_or_else(|| {
                 TranscribeError::InitFailed(
                     "Cohere engine selected but [cohere] config section is missing".to_string(),
                 )
             })?;
-            Ok(Box::new(cohere::CohereTranscriber::new(cfg)?))
+            if cfg.model.to_ascii_lowercase().ends_with(".gguf") {
+                #[cfg(feature = "cohere-gguf")]
+                { return Ok(Box::new(cohere_gguf::CohereGgufTranscriber::new(cfg)?)); }
+                #[cfg(not(feature = "cohere-gguf"))]
+                { return Err(TranscribeError::InitFailed("Cohere GGUF requires --features cohere-gguf".to_string())); }
+            }
+            #[cfg(feature = "cohere")]
+            { Ok(Box::new(cohere::CohereTranscriber::new(cfg)?)) }
+            #[cfg(not(feature = "cohere"))]
+            { Err(TranscribeError::InitFailed("Cohere ONNX requires --features cohere".to_string())) }
         }
-        #[cfg(not(feature = "cohere"))]
-        TranscriptionEngine::Cohere => Err(TranscribeError::InitFailed(
-            "Cohere engine requested but voxtype was not compiled with --features cohere"
-                .to_string(),
-        )),
         TranscriptionEngine::Soniox => {
             let cfg = config.soniox.as_ref().ok_or_else(|| {
                 TranscribeError::InitFailed(

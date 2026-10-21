@@ -3,7 +3,7 @@ members = ["xtask"]
 
 [package]
 name = "voxtype"
-version = "1.1.1"
+version = "1.2.0"
 edition = "2021"
 authors = ["Peter Jackson", "Jean-Paul van Tillo", "Máté Rémiás", "Rob Zolkos", "Dan Heuckeroth", "Igor Warzocha", "Julian Kaiser", "Kevin Miller", "konnsim", "reisset", "Zubair", "Loki Coyote", "Umesh", "Barrett Ruth", "André Silva", "Chmouel Boudjnah", "Christopher Albert", "Phuoc Thinh Vu", "Alexander Bosu-Kellett", "ayoahha", "Toizi", "kakapt", "Rinor Maloku", "Sami Jawhar", "jan Lemata", "Kai Stark", "graysky"]
 description = "Push-to-talk voice-to-text for Wayland"
@@ -90,6 +90,11 @@ ort = { version = "2.0.0-rc.12", optional = true, default-features = false, feat
 ndarray = { version = "0.16", optional = true }
 half = { version = "2", optional = true }
 tokenizers = { version = "0.20", optional = true, default-features = false, features = ["onig"] }
+transcribe-cpp = { version = "=0.2.3", optional = true, default-features = false }
+# Inverse text normalization: spoken-form numbers/dates/currency to written
+# form ("twenty five dollars" -> "$25"). Pure Rust port of NeMo text
+# processing; grammars are compiled in, so no runtime data files.
+text-processing-rs = { version = "0.2", optional = true }
 rustfft = { version = "6", optional = true }
 
 # OpenVINO GenAI backend (Intel NPU/CPU/GPU via OpenVINO GenAI WhisperPipeline)
@@ -168,7 +173,7 @@ nix = { version = "0.29", features = ["signal", "process", "user"] }  # Unix sig
 zbus = { version = "4", default-features = false, features = ["tokio"] }
 
 [features]
-default = []
+default = ["itn"]
 # OSD frontends. Each binary is gated on its own feature so users can
 # build only the rendering stack they need. Real GUI deps land in
 # Commits 4a/4b; the lists below grow then.
@@ -188,7 +193,7 @@ osd-native = [
     "dep:bytemuck",
 ]
 osd-gtk4 = ["dep:gtk4", "dep:gtk4-layer-shell", "dep:cairo-rs", "dep:glib"]
-gpu-vulkan = ["whisper-rs/vulkan"]
+gpu-vulkan = ["whisper-rs/vulkan", "cohere-gguf", "transcribe-cpp/vulkan"]
 gpu-cuda = ["whisper-rs/cuda"]
 gpu-metal = ["whisper-rs/metal"]
 gpu-hipblas = ["whisper-rs/hipblas"]
@@ -202,6 +207,11 @@ parakeet-migraphx = ["parakeet", "parakeet-rs/migraphx"]
 parakeet-coreml = ["parakeet", "parakeet-rs/coreml"]
 # Dynamic loading for system ONNX Runtime (used by Nix builds)
 parakeet-load-dynamic = ["parakeet", "parakeet-rs/load-dynamic"]
+# Inverse text normalization for dictated numbers, dates, currency and URLs.
+# On by default: pure Rust, no native deps, so every release build ships it
+# and `[text] format_numbers` works without a custom build.
+itn = ["dep:text-processing-rs"]
+
 # Shared ONNX dependencies for engines using fbank/CTC preprocessing
 onnx-common = ["dep:ort", "dep:ndarray", "dep:rustfft"]
 # Marker features that aggregate per-engine GPU EP flags. Each engine's
@@ -247,7 +257,9 @@ omnilingual-tensorrt = ["omnilingual", "onnx-tensorrt-enabled"]
 # Top of the Open ASR Leaderboard. Wired into CLI/config/factory; users opt in
 # via `cargo build --features cohere` and the model files are downloaded into
 # the standard models directory like other ONNX engines.
-cohere = ["onnx-common", "dep:half", "dep:tokenizers"]
+cohere = ["onnx-common", "dep:half", "dep:tokenizers", "cohere-gguf"]
+# GGUF models run in-process through transcribe.cpp's Rust binding.
+cohere-gguf = ["dep:transcribe-cpp"]
 cohere-cuda = ["cohere", "onnx-cuda-enabled"]
 cohere-tensorrt = ["cohere", "onnx-tensorrt-enabled"]
 # Soniox is unconditional. Its deps (tokio-tungstenite, futures-util, reqwest)

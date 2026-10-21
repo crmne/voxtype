@@ -280,21 +280,23 @@ impl Transcriber for WhisperTranscriber {
 
         let start = std::time::Instant::now();
 
-        // Create state for this transcription
-        let mut state = self
-            .ctx
-            .create_state()
-            .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
-
         // Determine language based on configuration mode
         let selected_language: Option<String> = if self.language.is_auto() {
             // Unconstrained auto-detection: let Whisper detect from all languages
             tracing::debug!("Using unconstrained language auto-detection");
             None
         } else if self.language.is_multiple() {
-            // Constrained auto-detection: detect from allowed set only
+            // Constrained auto-detection: detect from allowed set only.
+            // The detection state is scoped to this branch so it is freed
+            // before run_full() allocates its own. Each state carries its own
+            // GPU compute buffers, so creating one up front for every request
+            // doubled per-request GPU allocations for no use (#814).
             let allowed = self.language.as_vec();
             tracing::debug!("Using constrained language detection from: {:?}", allowed);
+            let mut state = self
+                .ctx
+                .create_state()
+                .map_err(|e| TranscribeError::InferenceFailed(e.to_string()))?;
             Some(self.select_language_from_allowed(&mut state, samples, &allowed)?)
         } else {
             // Single language: use it directly

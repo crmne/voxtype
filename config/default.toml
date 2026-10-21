@@ -29,6 +29,7 @@ enabled = false
 
 # Key to hold for push-to-talk (when enabled = true)
 # Common choices: SCROLLLOCK, PAUSE, RIGHTALT, F13-F24
+# On macOS: F13-F20 supported (PrintScreen/ScrollLock/Pause arrive as F13/F14/F15)
 # Use `evtest` to find key names for your keyboard
 key = "SCROLLLOCK"
 
@@ -223,6 +224,10 @@ on_transcription = true
 
 # Show notification when no speech is detected and the recording is discarded
 on_no_speech = true
+
+# When text cleanup or post_process changed the transcription, show the edits
+# as a word diff in the notification instead of a plain preview
+show_edits = true
 
 # [output.post_process]
 # Pipe transcribed text through an external command for cleanup before output.
