@@ -106,7 +106,7 @@ fn parse_ldd_missing(output: &str) -> Vec<String> {
 /// Returns `None` when the check cannot be performed (no provider library
 /// alongside the binary, or no `ldd`), and `Some(vec![])` when every
 /// dependency resolves.
-fn unresolved_provider_deps(binary_name: &str) -> Option<Vec<String>> {
+pub(crate) fn unresolved_provider_deps(binary_name: &str) -> Option<Vec<String>> {
     unresolved_provider_deps_at(&Path::new(VOXTYPE_LIB_DIR).join(binary_name))
 }
 
